@@ -16,6 +16,14 @@
 - **Pre-flight Disk Checks**: Analyzes available disk space via native OS APIs before operations begin to prevent out-of-space crashes.
 - Archive file extension: **`.bnc`**.
 
+## Primary Use Cases
+
+`bounce` is engineered to handle massive, dense binary files where traditional archivers struggle with either speed or memory overhead.
+
+- **Large Language Models (LLMs) & Neural Networks**: Excels at compressing and decompressing gigabyte-sized AI weights (`.safetensors`, `.gguf`, `.pt`, `.bin`). The byte-shuffle transform effortlessly aligns `float16`/`float32` structures, delivering extreme decompression speeds (~1.3 GB/s) critical for rapid model-loading pipelines.
+- **High-Performance Computing (HPC) & Big Data**: Rapid archiving of binary datasets, memory dumps, and telemetry data where maximizing sequential disk I/O throughput is paramount.
+- **Game Development & Asset Bundling**: Fast packing and unpacking of large binary asset archives (textures, geometry, audio banks) thanks to asynchronous buffer pools and zero external dependencies.
+
 ---
 
 ## Installation
@@ -115,7 +123,7 @@ bounce t backup.bnc
 
 ## Benchmarks
 
-Comparative benchmarks run on an **Apple M4 (10 cores, 24 GB RAM, arm64)**.
+Comparative benchmarks run on an **Apple MacBook Air M4 (10 cores, 24 GB RAM, arm64)**.
 Run benchmarks locally using: `bash benchmark.sh`
 
 ### Safetensors Model Weights — 450.05 MB (`model-mtp.safetensors`)
@@ -123,7 +131,7 @@ Unquantized IEEE-754 weights. Demonstrates the efficiency of the byte-shuffle tr
 
 | Tool | Size | Ratio | C (Compression) | D (Decompression) |
 |------|-----:|------:|----------------:|------------------:|
-| **bounce** | **339.3 MB** | **71.9%** | **110.7 MB/s** | **~500 MB/s** |
+| **bounce** | **339.3 MB** | **71.9%** | **110.7 MB/s** | **~1.3 GB/s** |
 | gzip -9 | 374.3 MB | 79.3% | 18.1 MB/s | 352.9 MB/s |
 | lz4 -9 | 468.5 MB | 99.3% | 189.5 MB/s | 2044.8 MB/s |
 | zstd -19 | 359.4 MB | 76.2% | 12.4 MB/s | 383.5 MB/s |
