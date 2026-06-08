@@ -126,6 +126,33 @@ pub struct EntryMeta {
     pub method: u8,
     pub stored_raw: bool,
     pub crc: u32,
+    pub offset: u64,
+}
+
+struct CDEntry {
+    path: String,
+    offset: u64,
+    orig_size: u64,
+    stored_size: u64,
+    crc: u32,
+    method: u8,
+    stored_raw: bool,
+    mode: u32,
+}
+
+fn pack_cd_crc(crc: u32, method: u8, stored_raw: bool, mode: u32) -> u64 {
+    (crc as u64)
+        | ((method as u64) << 32)
+        | ((stored_raw as u64) << 40)
+        | (((mode & 0xFFFF) as u64) << 48)
+}
+
+fn unpack_cd_crc(val: u64) -> (u32, u8, bool, u32) {
+    let crc = val as u32;
+    let method = (val >> 32) as u8;
+    let stored_raw = ((val >> 40) & 1) != 0;
+    let mode = ((val >> 48) & 0xFFFF) as u32;
+    (crc, method, stored_raw, mode)
 }
 
 // ── Input collection ────────────────────────────────────────────────────────
@@ -252,236 +279,311 @@ pub fn create(
         stored_total: 0,
     };
 
-    for f in &files {
-        let meta = fs::metadata(&f.abs)?;
-        let file_size = meta.len();
-        let mode = file_mode(&meta);
-        let mtime = file_mtime(&meta);
+    let concurrency = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
 
-        let (_orig_len, _stored_len) = if file_size < 512 * 1024 * 1024 {
-            let data = fs::read(&f.abs)?;
-            let crc = crc32(&data);
-            let (payload, method, stored_raw): (Vec<u8>, u8, bool) =
-                match codec::smart_compress(&data) {
-                    Some((c, m)) if c.len() < data.len() => (c, m.to_u8(), false),
-                    _ => (data.clone(), codec::CompressMethod::Plain.to_u8(), true),
-                };
+    let mut cd_entries = Vec::with_capacity(files.len());
 
-            let path_bytes = f.rel.as_bytes();
-            w.write_all(&(path_bytes.len() as u16).to_le_bytes())?;
-            w.write_all(path_bytes)?;
-            w.write_all(&mode.to_le_bytes())?;
-            w.write_all(&mtime.to_le_bytes())?;
-            w.write_all(&(data.len() as u64).to_le_bytes())?;
-            w.write_all(&(payload.len() as u64).to_le_bytes())?;
-            w.write_all(&[method])?;
-            w.write_all(&[stored_raw as u8])?;
-            w.write_all(&crc.to_le_bytes())?;
-            w.write_all(&payload)?;
-
-            stats.orig_total += data.len() as u64;
-            stats.stored_total += payload.len() as u64;
-
-            if verbose {
-                let pct = if data.is_empty() {
-                    0.0
+    let chunks = files.chunks(concurrency);
+    for chunk in chunks {
+        // Compress small files in parallel
+        let compressed_results = std::thread::scope(|s| {
+            let mut handles = Vec::new();
+            for f in chunk {
+                let meta = fs::metadata(&f.abs)?;
+                let file_size = meta.len();
+                if file_size < 512 * 1024 * 1024 {
+                    let abs_path = f.abs.clone();
+                    let handle = s.spawn(move || -> io::Result<Option<(Vec<u8>, Vec<u8>, u32, u8, bool)>> {
+                        let data = fs::read(&abs_path)?;
+                        let crc = crc32(&data);
+                        let (payload, method, stored_raw): (Vec<u8>, u8, bool) =
+                            match codec::smart_compress(&data) {
+                                Some((c, m)) if c.len() < data.len() => (c, m.to_u8(), false),
+                                _ => (data.clone(), codec::CompressMethod::Plain.to_u8(), true),
+                            };
+                        Ok(Some((data, payload, crc, method, stored_raw)))
+                    });
+                    handles.push(Some(handle));
                 } else {
-                    payload.len() as f64 / data.len() as f64 * 100.0
-                };
-                eprintln!(
-                    "  adding: {}  ({} -> {} bytes, {:.1}%)",
-                    f.rel,
-                    data.len(),
-                    payload.len(),
-                    pct
-                );
+                    handles.push(None);
+                }
             }
-            (data.len() as u64, payload.len() as u64)
-        } else {
-            let header_offset = w.stream_position()?;
-            let path_bytes = f.rel.as_bytes();
-            w.write_all(&(path_bytes.len() as u16).to_le_bytes())?;
-            w.write_all(path_bytes)?;
-            w.write_all(&mode.to_le_bytes())?;
-            w.write_all(&mtime.to_le_bytes())?;
-            w.write_all(&0u64.to_le_bytes())?; // orig_size placeholder
-            w.write_all(&0u64.to_le_bytes())?; // stored_size placeholder
-            w.write_all(&[0u8])?;              // method placeholder
-            w.write_all(&[0u8])?;              // stored_raw placeholder
-            w.write_all(&0u32.to_le_bytes())?; // crc placeholder
 
-            let payload_start = w.stream_position()?;
-            w.write_all(&0u32.to_le_bytes())?; // num_blocks placeholder
-
-            let mut file = fs::File::open(&f.abs)?;
-
-            // Read 1MB sample from the middle of the file to bypass metadata headers and determine the best method
-            let sample_offset = file_size / 2;
-            let sample_size = std::cmp::min(file_size - sample_offset, 1 * 1024 * 1024) as usize;
-            let mut sample = vec![0u8; sample_size];
-            file.seek(SeekFrom::Start(sample_offset))?;
-            file.read_exact(&mut sample)?;
-            file.seek(SeekFrom::Start(0))?;
-
-            let method = match codec::smart_compress(&sample) {
-                Some((_, codec::CompressMethod::Shuffle)) | Some((_, codec::CompressMethod::ShuffleBlk)) => {
-                    codec::CompressMethod::ShuffleBlk
+            let mut results = Vec::new();
+            for h_opt in handles {
+                if let Some(h) = h_opt {
+                    results.push(h.join().unwrap()?);
+                } else {
+                    results.push(None);
                 }
-                Some((_, codec::CompressMethod::Shuffle2)) | Some((_, codec::CompressMethod::Shuffle2Blk)) => {
-                    codec::CompressMethod::Shuffle2Blk
+            }
+            Ok::<_, io::Error>(results)
+        })?;
+
+        // Write sequentially
+        for (i, f) in chunk.iter().enumerate() {
+            let meta = fs::metadata(&f.abs)?;
+            let file_size = meta.len();
+            let mode = file_mode(&meta);
+            let mtime = file_mtime(&meta);
+
+            let offset = w.stream_position()?;
+
+            if let Some((data, payload, crc, method, stored_raw)) = &compressed_results[i] {
+                let path_bytes = f.rel.as_bytes();
+                w.write_all(&(path_bytes.len() as u16).to_le_bytes())?;
+                w.write_all(path_bytes)?;
+                w.write_all(&mode.to_le_bytes())?;
+                w.write_all(&mtime.to_le_bytes())?;
+                w.write_all(&(data.len() as u64).to_le_bytes())?;
+                w.write_all(&(payload.len() as u64).to_le_bytes())?;
+                w.write_all(&[*method])?;
+                w.write_all(&[*stored_raw as u8])?;
+                w.write_all(&crc.to_le_bytes())?;
+                w.write_all(payload)?;
+
+                stats.orig_total += data.len() as u64;
+                stats.stored_total += payload.len() as u64;
+
+                if verbose {
+                    let pct = if data.is_empty() {
+                        0.0
+                    } else {
+                        payload.len() as f64 / data.len() as f64 * 100.0
+                    };
+                    eprintln!(
+                        "  adding: {}  ({} -> {} bytes, {:.1}%)",
+                        f.rel,
+                        data.len(),
+                        payload.len(),
+                        pct
+                    );
                 }
-                _ => codec::CompressMethod::Blocked,
-            };
 
-            let mut num_blocks = 0u32;
-            let mut crc = 0u32;
-            let mut orig_size = 0u64;
+                cd_entries.push(CDEntry {
+                    path: f.rel.clone(),
+                    offset,
+                    orig_size: data.len() as u64,
+                    stored_size: payload.len() as u64,
+                    crc: *crc,
+                    method: *method,
+                    stored_raw: *stored_raw,
+                    mode,
+                });
+            } else {
+                // Large file path: sequential block compression
+                let path_bytes = f.rel.as_bytes();
+                w.write_all(&(path_bytes.len() as u16).to_le_bytes())?;
+                w.write_all(path_bytes)?;
+                w.write_all(&mode.to_le_bytes())?;
+                w.write_all(&mtime.to_le_bytes())?;
+                w.write_all(&0u64.to_le_bytes())?; // orig_size placeholder
+                w.write_all(&0u64.to_le_bytes())?; // stored_size placeholder
+                w.write_all(&[0u8])?;              // method placeholder
+                w.write_all(&[0u8])?;              // stored_raw placeholder
+                w.write_all(&0u32.to_le_bytes())?; // crc placeholder
 
-            if method == codec::CompressMethod::Blocked {
-                let mut reader = BufReader::with_capacity(2 * 1024 * 1024, file);
-                let mut buffer = vec![0u8; codec::BLOCK_SIZE];
-                let mut head = vec![-1i32; codec::LZV2_HASH_SIZE];
-                let mut prev = vec![0i32; codec::LZV2_WINDOW_SIZE];
+                let payload_start = w.stream_position()?;
+                w.write_all(&0u32.to_le_bytes())?; // num_blocks placeholder
 
-                loop {
-                    let mut block_len = 0;
-                    while block_len < codec::BLOCK_SIZE {
-                        match reader.read(&mut buffer[block_len..]) {
+                let mut file = fs::File::open(&f.abs)?;
+
+                // Read 1MB sample from the middle of the file to bypass metadata headers and determine the best method
+                let sample_offset = file_size / 2;
+                let sample_size = std::cmp::min(file_size - sample_offset, 1 * 1024 * 1024) as usize;
+                let mut sample = vec![0u8; sample_size];
+                file.seek(SeekFrom::Start(sample_offset))?;
+                file.read_exact(&mut sample)?;
+                file.seek(SeekFrom::Start(0))?;
+
+                let method = match codec::smart_compress(&sample) {
+                    Some((_, codec::CompressMethod::Shuffle)) | Some((_, codec::CompressMethod::ShuffleBlk)) => {
+                        codec::CompressMethod::ShuffleBlk
+                    }
+                    Some((_, codec::CompressMethod::Shuffle2)) | Some((_, codec::CompressMethod::Shuffle2Blk)) => {
+                        codec::CompressMethod::Shuffle2Blk
+                    }
+                    _ => codec::CompressMethod::Blocked,
+                };
+
+                let mut num_blocks = 0u32;
+                let mut crc = 0u32;
+                let mut orig_size = 0u64;
+
+                if method == codec::CompressMethod::Blocked {
+                    let mut reader = BufReader::with_capacity(2 * 1024 * 1024, file);
+                    let mut buffer = vec![0u8; codec::BLOCK_SIZE];
+                    let mut head = vec![-1i32; codec::LZV2_HASH_SIZE];
+                    let mut prev = vec![0i32; codec::LZV2_WINDOW_SIZE];
+
+                    loop {
+                        let mut block_len = 0;
+                        while block_len < codec::BLOCK_SIZE {
+                            match reader.read(&mut buffer[block_len..]) {
+                                Ok(0) => break,
+                                Ok(n) => block_len += n,
+                                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        if block_len == 0 {
+                            break;
+                        }
+
+                        let block = &buffer[..block_len];
+                        crc = crc32_update(crc, block);
+                        orig_size += block_len as u64;
+
+                        head.fill(-1);
+                        let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev);
+                        let res = codec::encode_block_result(block, c_opt);
+                        w.write_all(&res)?;
+                        num_blocks += 1;
+                    }
+                } else {
+                    // Compute CRC32 sequentially in 64KB chunks
+                    let mut crc_buf = vec![0u8; 64 * 1024];
+                    loop {
+                        match file.read(&mut crc_buf) {
                             Ok(0) => break,
-                            Ok(n) => block_len += n,
+                            Ok(n) => crc = crc32_update(crc, &crc_buf[..n]),
                             Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
                             Err(e) => return Err(e),
                         }
                     }
-                    if block_len == 0 {
-                        break;
-                    }
+                    file.seek(SeekFrom::Start(0))?;
 
-                    let block = &buffer[..block_len];
-                    crc = crc32_update(crc, block);
-                    orig_size += block_len as u64;
+                    let mut buffer = vec![0u8; codec::BLOCK_SIZE];
+                    let mut head = vec![-1i32; codec::LZV2_HASH_SIZE];
+                    let mut prev = vec![0i32; codec::LZV2_WINDOW_SIZE];
 
-                    head.fill(-1);
-                    let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev);
-                    let res = codec::encode_block_result(block, c_opt);
-                    w.write_all(&res)?;
-                    num_blocks += 1;
-                }
-            } else {
-                // Compute CRC32 sequentially in 64KB chunks
-                let mut crc_buf = vec![0u8; 64 * 1024];
-                loop {
-                    match file.read(&mut crc_buf) {
-                        Ok(0) => break,
-                        Ok(n) => crc = crc32_update(crc, &crc_buf[..n]),
-                        Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
-                        Err(e) => return Err(e),
-                    }
-                }
-                file.seek(SeekFrom::Start(0))?;
+                    let stride = if method == codec::CompressMethod::ShuffleBlk { 4 } else { 2 };
+                    let groups = (file_size as usize) / stride;
+                    let mut prev_byte = [0u8; 4];
+                    let mut span_buf = Vec::new();
 
-                let mut buffer = vec![0u8; codec::BLOCK_SIZE];
-                let mut head = vec![-1i32; codec::LZV2_HASH_SIZE];
-                let mut prev = vec![0i32; codec::LZV2_WINDOW_SIZE];
+                    let num_blocks_expected = ((file_size + codec::BLOCK_SIZE as u64 - 1) / codec::BLOCK_SIZE as u64) as u32;
 
-                let stride = if method == codec::CompressMethod::ShuffleBlk { 4 } else { 2 };
-                let groups = (file_size as usize) / stride;
-                let mut prev_byte = [0u8; 4];
-                let mut span_buf = Vec::new();
+                    for b_idx_exp in 0..num_blocks_expected {
+                        let start_byte = b_idx_exp as usize * codec::BLOCK_SIZE;
+                        let end_byte = std::cmp::min((b_idx_exp as usize + 1) * codec::BLOCK_SIZE, file_size as usize);
+                        let block_len = end_byte - start_byte;
 
-                let num_blocks_expected = ((file_size + codec::BLOCK_SIZE as u64 - 1) / codec::BLOCK_SIZE as u64) as u32;
+                        let mut curr_i = start_byte;
+                        let mut buf_idx = 0;
 
-                for b_idx_exp in 0..num_blocks_expected {
-                    let start_byte = b_idx_exp as usize * codec::BLOCK_SIZE;
-                    let end_byte = std::cmp::min((b_idx_exp as usize + 1) * codec::BLOCK_SIZE, file_size as usize);
-                    let block_len = end_byte - start_byte;
+                        while curr_i < end_byte {
+                            if curr_i >= stride * groups {
+                                let rem_len = end_byte - curr_i;
+                                file.seek(SeekFrom::Start(curr_i as u64))?;
+                                file.read_exact(&mut buffer[buf_idx..buf_idx + rem_len])?;
+                                buf_idx += rem_len;
+                                curr_i += rem_len;
+                            } else {
+                                let s = curr_i / groups;
+                                let lane_end_i = std::cmp::min((s + 1) * groups, end_byte);
+                                let chunk_len = lane_end_i - curr_i;
 
-                    let mut curr_i = start_byte;
-                    let mut buf_idx = 0;
+                                let g_start = curr_i % groups;
+                                let orig_start_offset = g_start * stride + s;
+                                let orig_span_len = (chunk_len - 1) * stride + 1;
 
-                    while curr_i < end_byte {
-                        if curr_i >= stride * groups {
-                            let rem_len = end_byte - curr_i;
-                            file.seek(SeekFrom::Start(curr_i as u64))?;
-                            file.read_exact(&mut buffer[buf_idx..buf_idx + rem_len])?;
-                            buf_idx += rem_len;
-                            curr_i += rem_len;
-                        } else {
-                            let s = curr_i / groups;
-                            let lane_end_i = std::cmp::min((s + 1) * groups, end_byte);
-                            let chunk_len = lane_end_i - curr_i;
+                                if span_buf.len() < orig_span_len {
+                                    span_buf.resize(orig_span_len, 0);
+                                }
+                                file.seek(SeekFrom::Start(orig_start_offset as u64))?;
+                                file.read_exact(&mut span_buf[..orig_span_len])?;
 
-                            let g_start = curr_i % groups;
-                            let orig_start_offset = g_start * stride + s;
-                            let orig_span_len = (chunk_len - 1) * stride + 1;
-
-                            if span_buf.len() < orig_span_len {
-                                span_buf.resize(orig_span_len, 0);
+                                for j in 0..chunk_len {
+                                    let val = span_buf[j * stride];
+                                    let delta = val.wrapping_sub(prev_byte[s]);
+                                    buffer[buf_idx] = delta;
+                                    prev_byte[s] = val;
+                                    buf_idx += 1;
+                                }
+                                curr_i = lane_end_i;
                             }
-                            file.seek(SeekFrom::Start(orig_start_offset as u64))?;
-                            file.read_exact(&mut span_buf[..orig_span_len])?;
-
-                            for j in 0..chunk_len {
-                                let val = span_buf[j * stride];
-                                let delta = val.wrapping_sub(prev_byte[s]);
-                                buffer[buf_idx] = delta;
-                                prev_byte[s] = val;
-                                buf_idx += 1;
-                            }
-                            curr_i = lane_end_i;
                         }
+
+                        let block = &buffer[..block_len];
+                        orig_size += block_len as u64;
+
+                        head.fill(-1);
+                        let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev);
+                        let res = codec::encode_block_result(block, c_opt);
+                        w.write_all(&res)?;
+                        num_blocks += 1;
                     }
-
-                    let block = &buffer[..block_len];
-                    orig_size += block_len as u64;
-
-                    head.fill(-1);
-                    let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev);
-                    let res = codec::encode_block_result(block, c_opt);
-                    w.write_all(&res)?;
-                    num_blocks += 1;
                 }
-            }
 
-            let payload_end = w.stream_position()?;
-            let stored_size = payload_end - payload_start;
+                let payload_end = w.stream_position()?;
+                let stored_size = payload_end - payload_start;
 
-            // Rewrite num_blocks
-            w.seek(SeekFrom::Start(payload_start))?;
-            w.write_all(&num_blocks.to_le_bytes())?;
+                // Rewrite num_blocks
+                w.seek(SeekFrom::Start(payload_start))?;
+                w.write_all(&num_blocks.to_le_bytes())?;
 
-            // Rewrite header values
-            w.seek(SeekFrom::Start(header_offset + 14 + path_bytes.len() as u64))?;
-            w.write_all(&orig_size.to_le_bytes())?;
-            w.write_all(&stored_size.to_le_bytes())?;
-            w.write_all(&[method.to_u8()])?;
-            w.write_all(&[0u8])?; // stored_raw = false
-            w.write_all(&crc.to_le_bytes())?;
+                // Rewrite header values
+                w.seek(SeekFrom::Start(offset + 14 + path_bytes.len() as u64))?;
+                w.write_all(&orig_size.to_le_bytes())?;
+                w.write_all(&stored_size.to_le_bytes())?;
+                w.write_all(&[method.to_u8()])?;
+                w.write_all(&[0u8])?; // stored_raw = false
+                w.write_all(&crc.to_le_bytes())?;
 
-            w.seek(SeekFrom::Start(payload_end))?;
+                w.seek(SeekFrom::Start(payload_end))?;
 
-            stats.orig_total += orig_size;
-            stats.stored_total += stored_size;
+                stats.orig_total += orig_size;
+                stats.stored_total += stored_size;
 
-            if verbose {
-                let pct = if orig_size == 0 {
-                    0.0
-                } else {
-                    stored_size as f64 / orig_size as f64 * 100.0
-                };
-                eprintln!(
-                    "  adding: {}  ({} -> {} bytes, {:.1}%)",
-                    f.rel,
+                if verbose {
+                    let pct = if orig_size == 0 {
+                        0.0
+                    } else {
+                        stored_size as f64 / orig_size as f64 * 100.0
+                    };
+                    eprintln!(
+                        "  adding: {}  ({} -> {} bytes, {:.1}%)",
+                        f.rel,
+                        orig_size,
+                        stored_size,
+                        pct
+                    );
+                }
+
+                cd_entries.push(CDEntry {
+                    path: f.rel.clone(),
+                    offset,
                     orig_size,
                     stored_size,
-                    pct
-                );
+                    crc,
+                    method: method.to_u8(),
+                    stored_raw: false,
+                    mode,
+                });
             }
-            (orig_size, stored_size)
-        };
 
-        stats.files += 1;
+            stats.files += 1;
+        }
     }
+
+    // Write Central Directory Index
+    let cd_start_offset = w.stream_position()?;
+    w.write_all(&(cd_entries.len() as u32).to_le_bytes())?;
+    for entry in &cd_entries {
+        let path_bytes = entry.path.as_bytes();
+        w.write_all(&(path_bytes.len() as u16).to_le_bytes())?;
+        w.write_all(path_bytes)?;
+        w.write_all(&entry.offset.to_le_bytes())?;
+        w.write_all(&entry.orig_size.to_le_bytes())?;
+        w.write_all(&entry.stored_size.to_le_bytes())?;
+        
+        let crc_packed = pack_cd_crc(entry.crc, entry.method, entry.stored_raw, entry.mode);
+        w.write_all(&crc_packed.to_le_bytes())?;
+    }
+    w.write_all(&cd_start_offset.to_le_bytes())?;
 
     w.flush()?;
     Ok(stats)
@@ -546,7 +648,8 @@ fn open_archive(archive_path: &str) -> io::Result<(BufReader<fs::File>, u32)> {
     Ok((r, count))
 }
 
-fn read_entry_header<R: Read>(r: &mut R) -> io::Result<EntryMeta> {
+fn read_entry_header<R: Read + Seek>(r: &mut R) -> io::Result<EntryMeta> {
+    let offset = r.stream_position()?;
     let path_len = read_u16(r)? as usize;
     let mut path_buf = vec![0u8; path_len];
     r.read_exact(&mut path_buf)?;
@@ -569,12 +672,108 @@ fn read_entry_header<R: Read>(r: &mut R) -> io::Result<EntryMeta> {
         method: m[0],
         stored_raw: raw[0] != 0,
         crc,
+        offset,
     })
+}
+
+fn read_cd_index<R: Read + Seek>(
+    r: &mut R,
+    header_count: u32,
+    file_len: u64,
+) -> io::Result<Option<Vec<EntryMeta>>> {
+    if file_len < 9 + 8 {
+        return Ok(None);
+    }
+    if r.seek(SeekFrom::Start(file_len - 8)).is_err() {
+        return Ok(None);
+    }
+    let mut cd_offset_bytes = [0u8; 8];
+    if r.read_exact(&mut cd_offset_bytes).is_err() {
+        return Ok(None);
+    }
+    let cd_offset = u64::from_le_bytes(cd_offset_bytes);
+    if cd_offset < 9 || cd_offset >= file_len - 8 {
+        return Ok(None);
+    }
+    if r.seek(SeekFrom::Start(cd_offset)).is_err() {
+        return Ok(None);
+    }
+    let mut cd_count_bytes = [0u8; 4];
+    if r.read_exact(&mut cd_count_bytes).is_err() {
+        return Ok(None);
+    }
+    let cd_count = u32::from_le_bytes(cd_count_bytes);
+    if cd_count != header_count {
+        return Ok(None);
+    }
+    let mut entries = Vec::with_capacity(cd_count as usize);
+    for _ in 0..cd_count {
+        let mut path_len_bytes = [0u8; 2];
+        if r.read_exact(&mut path_len_bytes).is_err() {
+            return Ok(None);
+        }
+        let path_len = u16::from_le_bytes(path_len_bytes) as usize;
+        let mut path_bytes = vec![0u8; path_len];
+        if r.read_exact(&mut path_bytes).is_err() {
+            return Ok(None);
+        }
+        let path = match String::from_utf8(path_bytes) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+        let mut offset_bytes = [0u8; 8];
+        if r.read_exact(&mut offset_bytes).is_err() {
+            return Ok(None);
+        }
+        let offset = u64::from_le_bytes(offset_bytes);
+        let mut orig_size_bytes = [0u8; 8];
+        if r.read_exact(&mut orig_size_bytes).is_err() {
+            return Ok(None);
+        }
+        let orig_size = u64::from_le_bytes(orig_size_bytes);
+        let mut stored_size_bytes = [0u8; 8];
+        if r.read_exact(&mut stored_size_bytes).is_err() {
+            return Ok(None);
+        }
+        let stored_size = u64::from_le_bytes(stored_size_bytes);
+        let mut crc_val_bytes = [0u8; 8];
+        if r.read_exact(&mut crc_val_bytes).is_err() {
+            return Ok(None);
+        }
+        let crc_val = u64::from_le_bytes(crc_val_bytes);
+        let (crc, method, stored_raw, mode) = unpack_cd_crc(crc_val);
+        if offset >= cd_offset {
+            return Ok(None);
+        }
+        entries.push(EntryMeta {
+            path,
+            mode,
+            mtime: 0,
+            orig_size,
+            stored_size,
+            method,
+            stored_raw,
+            crc,
+            offset,
+        });
+    }
+    if let Ok(pos) = r.stream_position() {
+        if pos == file_len - 8 {
+            return Ok(Some(entries));
+        }
+    }
+    Ok(None)
 }
 
 /// Read every entry header (payloads skipped) for listing.
 pub fn list_entries(archive_path: &str) -> io::Result<Vec<EntryMeta>> {
+    let file = fs::File::open(archive_path)?;
+    let file_len = file.metadata()?.len();
     let (mut r, count) = open_archive(archive_path)?;
+    if let Ok(Some(entries)) = read_cd_index(&mut r, count, file_len) {
+        return Ok(entries);
+    }
+    r.seek(SeekFrom::Start(9))?;
     let mut out = Vec::with_capacity(count as usize);
     for _ in 0..count {
         let meta = read_entry_header(&mut r)?;
@@ -904,10 +1103,69 @@ pub fn extract(
     force: bool,
     verbose: bool,
 ) -> io::Result<usize> {
+    let file = fs::File::open(archive_path)?;
+    let file_len = file.metadata()?.len();
     let (mut r, count) = open_archive(archive_path)?;
     let dest = Path::new(dest_dir);
     let mut extracted = 0usize;
 
+    if !filter.is_empty() {
+        if let Ok(Some(entries)) = read_cd_index(&mut r, count, file_len) {
+            for entry in &entries {
+                let wanted = filter.iter().any(|f| f == &entry.path);
+                if !wanted {
+                    continue;
+                }
+
+                r.seek(SeekFrom::Start(entry.offset))?;
+                let meta = read_entry_header(&mut r)?;
+
+                let out_path = safe_join(dest, &meta.path)?;
+                if out_path.exists() && !force {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("{} exists (use -f to overwrite)", out_path.display()),
+                    ));
+                }
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+
+                let out_file = fs::File::create(&out_path)?;
+                let mut w = CountingWriter {
+                    inner: BufWriter::with_capacity(2 * 1024 * 1024, out_file),
+                    count: 0,
+                };
+
+                let actual_crc = extract_entry_payload(&mut r, &meta, &mut w)?;
+                w.flush()?;
+
+                if w.count != meta.orig_size {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}: size mismatch ({} != {})", meta.path, w.count, meta.orig_size),
+                    ));
+                }
+
+                if actual_crc != meta.crc {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}: CRC mismatch (corrupt), aborting", meta.path),
+                    ));
+                }
+
+                restore_mode(&out_path, meta.mode);
+
+                extracted += 1;
+                if verbose {
+                    eprintln!("  extracted: {}", meta.path);
+                }
+            }
+            return Ok(extracted);
+        }
+    }
+
+    r.seek(SeekFrom::Start(9))?;
     for _ in 0..count {
         let meta = read_entry_header(&mut r)?;
 
@@ -970,9 +1228,51 @@ pub fn extract_to_writer<W: Write>(
     out: &mut W,
     filter: &[String],
 ) -> io::Result<usize> {
+    let file = fs::File::open(archive_path)?;
+    let file_len = file.metadata()?.len();
     let (mut r, count) = open_archive(archive_path)?;
     let mut extracted = 0usize;
 
+    if !filter.is_empty() {
+        if let Ok(Some(entries)) = read_cd_index(&mut r, count, file_len) {
+            for entry in &entries {
+                let wanted = filter.iter().any(|f| f == &entry.path);
+                if !wanted {
+                    continue;
+                }
+
+                r.seek(SeekFrom::Start(entry.offset))?;
+                let meta = read_entry_header(&mut r)?;
+
+                let mut w = CountingWriter {
+                    inner: &mut *out,
+                    count: 0,
+                };
+
+                let actual_crc = extract_entry_payload(&mut r, &meta, &mut w)?;
+
+                if w.count != meta.orig_size {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}: size mismatch ({} != {})", meta.path, w.count, meta.orig_size),
+                    ));
+                }
+
+                if actual_crc != meta.crc {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}: CRC mismatch (corrupt), aborting", meta.path),
+                    ));
+                }
+
+                extracted += 1;
+            }
+            out.flush()?;
+            return Ok(extracted);
+        }
+    }
+
+    r.seek(SeekFrom::Start(9))?;
     for _ in 0..count {
         let meta = read_entry_header(&mut r)?;
 
@@ -1049,12 +1349,33 @@ mod tests {
         let stats = create(archive.to_str().unwrap(), &inputs, false).unwrap();
         assert_eq!(stats.files, 3);
 
+        // 1. Verify list entries (should read from CD)
         let entries = list_entries(archive.to_str().unwrap()).unwrap();
         assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].path, "src/a.txt");
+        assert_eq!(entries[1].path, "src/empty");
+        assert_eq!(entries[2].path, "src/nested/b.bin");
 
+        // 2. Verify test (integrity scan)
         let verified = test(archive.to_str().unwrap(), false).unwrap();
         assert_eq!(verified, 3);
 
+        // 3. Verify selective extraction (uses CD seeking)
+        let dest_sel = dir.join("restored_sel");
+        let n_sel = extract(
+            archive.to_str().unwrap(),
+            dest_sel.to_str().unwrap(),
+            &["src/a.txt".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(n_sel, 1);
+        assert!(dest_sel.join("src/a.txt").exists());
+        assert!(!dest_sel.join("src/nested/b.bin").exists());
+        assert_eq!(fs::read(dest_sel.join("src/a.txt")).unwrap(), text.as_bytes());
+
+        // 4. Verify full extraction
         let dest = dir.join("restored");
         let n = extract(
             archive.to_str().unwrap(),
@@ -1070,6 +1391,34 @@ mod tests {
         assert_eq!(restored_a, text.as_bytes());
         let restored_b = fs::read(dest.join("src/nested/b.bin")).unwrap();
         assert_eq!(restored_b, vec![7u8; 40_000]);
+
+        // 5. Test backward compatibility: truncate CD index from end of file
+        // Read file length and find where CD index starts
+        let file_data = fs::read(&archive).unwrap();
+        let len = file_data.len();
+        let cd_offset = u64::from_le_bytes(file_data[len - 8..].try_into().unwrap()) as usize;
+        
+        // Truncate the file to exclude the CD index
+        let truncated_archive = dir.join("truncated.bnc");
+        fs::write(&truncated_archive, &file_data[..cd_offset]).unwrap();
+
+        // Verify that we can still list entries successfully (via fallback)
+        let entries_fallback = list_entries(truncated_archive.to_str().unwrap()).unwrap();
+        assert_eq!(entries_fallback.len(), 3);
+        assert_eq!(entries_fallback[0].path, "src/a.txt");
+
+        // Verify that we can still extract from the truncated archive (via fallback)
+        let dest_fallback = dir.join("restored_fallback");
+        let n_fallback = extract(
+            truncated_archive.to_str().unwrap(),
+            dest_fallback.to_str().unwrap(),
+            &["src/nested/b.bin".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(n_fallback, 1);
+        assert!(dest_fallback.join("src/nested/b.bin").exists());
 
         let _ = fs::remove_dir_all(&dir);
     }
