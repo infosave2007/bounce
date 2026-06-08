@@ -390,22 +390,17 @@ impl<'a> BitReader<'a> {
 
     #[inline(always)]
     fn fill(&mut self) {
-        while self.bits_left <= 56 && self.idx < self.data.len() {
-            let needed_bytes = (64 - self.bits_left) / 8;
-            let available = self.data.len() - self.idx;
-            let to_read = std::cmp::min(needed_bytes, available);
-            if to_read >= 4 {
-                let bytes = [
-                    self.data[self.idx],
-                    self.data[self.idx + 1],
-                    self.data[self.idx + 2],
-                    self.data[self.idx + 3],
-                ];
-                let val = u32::from_be_bytes(bytes);
-                self.bit_buf = (self.bit_buf << 32) | (val as u64);
-                self.bits_left += 32;
-                self.idx += 4;
+        if self.bits_left <= 56 {
+            let bytes_to_take = (64 - self.bits_left) / 8;
+            if bytes_to_take > 0 && self.idx + 8 <= self.data.len() {
+                let v = u64::from_be_bytes(self.data[self.idx..self.idx + 8].try_into().unwrap());
+                let shift = 64 - bytes_to_take * 8;
+                self.bit_buf = (self.bit_buf << (bytes_to_take * 8)) | (v >> shift);
+                self.bits_left += bytes_to_take * 8;
+                self.idx += bytes_to_take;
             } else {
+                let available = self.data.len() - self.idx;
+                let to_read = std::cmp::min(bytes_to_take, available);
                 for _ in 0..to_read {
                     self.bit_buf = (self.bit_buf << 8) | (self.data[self.idx] as u64);
                     self.bits_left += 8;
