@@ -177,7 +177,7 @@ Unquantized IEEE-754 neural network weights. This demonstrates the efficiency of
 
 | Tool | Size | Ratio | C (Compression) | D (Decompression) |
 |------|-----:|------:|----------------:|------------------:|
-| **bounce** | **339,380,024** | **71.9%** | **34.9 MB/s** | **452.7 MB/s** |
+| **bounce** | **339,371,401** | **71.9%** | **110.7 MB/s** | **456.8 MB/s** |
 | gzip -9 | 374,391,731 | 79.3% | 18.1 MB/s | 352.9 MB/s |
 | lz4 -9 | 468,560,164 | 99.3% | 189.5 MB/s | 2044.8 MB/s |
 | zstd -19 | 359,412,232 | 76.2% | 12.4 MB/s | 383.5 MB/s |

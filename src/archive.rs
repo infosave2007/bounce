@@ -299,42 +299,61 @@ fn compress_stream_blocked<R: Read, W: Write, T: codec::TableIndex>(
     file_name: &str,
     file_size: u64,
 ) -> io::Result<()> {
-    let mut buffer = vec![0u8; block_size];
-    let mut head = vec![T::SENTINEL; codec::LZV2_HASH_SIZE];
-    let mut prev = vec![T::SENTINEL; window_size];
-    let mut buffers = codec::CompressBuffers::new();
-
     let start_time = std::time::Instant::now();
     let mut stored_size = 0u64;
 
+    let concurrency = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let batch_size = concurrency * 4;
+
     loop {
-        let mut block_len = 0;
-        while block_len < block_size {
-            match reader.read(&mut buffer[block_len..]) {
-                Ok(0) => break,
-                Ok(n) => block_len += n,
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+        let mut batch = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            let mut buffer = vec![0u8; block_size];
+            let mut block_len = 0;
+            while block_len < block_size {
+                match reader.read(&mut buffer[block_len..]) {
+                    Ok(0) => break,
+                    Ok(n) => block_len += n,
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
             }
+            if block_len == 0 {
+                break;
+            }
+            buffer.truncate(block_len);
+            *crc = crc32_update(*crc, &buffer);
+            *orig_size += block_len as u64;
+            batch.push(buffer);
         }
-        if block_len == 0 {
+
+        if batch.is_empty() {
             break;
         }
 
-        let block = &buffer[..block_len];
-        *crc = crc32_update(*crc, block);
-        *orig_size += block_len as u64;
+        let compressed_batch = std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(batch.len());
+            for block in &batch {
+                handles.push(s.spawn(move || {
+                    let mut head = vec![T::SENTINEL; codec::LZV2_HASH_SIZE];
+                    let mut prev = vec![T::SENTINEL; window_size];
+                    let mut buffers = codec::CompressBuffers::new();
+                    let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version);
+                    codec::encode_block_result(block, c_opt)
+                }));
+            }
+            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        });
 
-        let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version);
-        let res = codec::encode_block_result(block, c_opt);
-        w.write_all(&res)?;
-        stored_size += res.len() as u64;
-        
+        for res in compressed_batch {
+            w.write_all(&res)?;
+            stored_size += res.len() as u64;
+            *num_blocks += 1;
+        }
+
         if show_progress {
             print_progress(file_name, *orig_size, file_size, stored_size, start_time);
         }
-
-        *num_blocks += 1;
     }
     if show_progress {
         eprint!("\r\x1b[K"); // Clear the line when done
@@ -360,20 +379,19 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
     let mut prev_byte = [0u8; 4];
 
     // Buffer for each lane before compression
-    let mut lane_buffers = vec![Vec::with_capacity(block_size); stride];
+    let mut lane_buffers = vec![Vec::new(); stride];
     // Buffered compressed blocks for each lane
     let mut compressed_blocks = vec![Vec::new(); stride];
 
-    let mut chunk = vec![0u8; block_size * stride];
-    let mut heads = vec![vec![T::SENTINEL; codec::LZV2_HASH_SIZE]; stride];
-    let mut prevs = vec![vec![T::SENTINEL; window_size]; stride];
-    let mut buffers = codec::CompressBuffers::new();
+    let concurrency = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let batch_multiplier = concurrency * 4;
+    let mut chunk = vec![0u8; block_size * stride * batch_multiplier];
 
     let start_time = std::time::Instant::now();
     let mut stored_size = 0u64;
     let mut bytes_processed = 0;
     loop {
-        // Read up to block_size * stride bytes
+        // Read up to chunk.len() bytes
         let mut chunk_len = 0;
         while chunk_len < chunk.len() {
             match reader.read(&mut chunk[chunk_len..]) {
@@ -410,20 +428,42 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
                     }
                 }
                 i += num_groups * stride;
-                
-                // Check if lane buffers are full
-                for s in 0..stride {
-                    if lane_buffers[s].len() >= block_size {
-                        let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut heads[s], &mut prevs[s], &mut buffers, window_size, format_version);
-                        let res = codec::encode_block_result(&lane_buffers[s], c_opt);
-                        stored_size += res.len() as u64;
-                        compressed_blocks[s].push(res);
-                        lane_buffers[s].clear();
-                    }
-                }
             }
         }
         bytes_processed += chunk_len;
+
+        // Prepare blocks to compress
+        let mut blocks_to_compress = Vec::new();
+        for s in 0..stride {
+            let num_blocks_lane = lane_buffers[s].len() / block_size;
+            for b in 0..num_blocks_lane {
+                let block_data = lane_buffers[s][b * block_size .. (b + 1) * block_size].to_vec();
+                blocks_to_compress.push((s, block_data));
+            }
+            lane_buffers[s].drain(0 .. num_blocks_lane * block_size);
+        }
+
+        if !blocks_to_compress.is_empty() {
+            let compressed_batch = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(blocks_to_compress.len());
+                for (lane, block) in &blocks_to_compress {
+                    handles.push(scope.spawn(move || {
+                        let mut head = vec![T::SENTINEL; codec::LZV2_HASH_SIZE];
+                        let mut prev = vec![T::SENTINEL; window_size];
+                        let mut buffers = codec::CompressBuffers::new();
+                        let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version);
+                        let res = codec::encode_block_result(block, c_opt);
+                        (*lane, res)
+                    }));
+                }
+                handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+            });
+
+            for (lane, res) in compressed_batch {
+                stored_size += res.len() as u64;
+                compressed_blocks[lane].push(res);
+            }
+        }
 
         if show_progress {
             print_progress(file_name, bytes_processed as u64, file_size, stored_size, start_time);
@@ -431,13 +471,37 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
     }
 
     // Compress any remaining bytes in lane buffers
+    let mut final_blocks = Vec::new();
     for s in 0..stride {
         if !lane_buffers[s].is_empty() {
-            let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut heads[s], &mut prevs[s], &mut buffers, window_size, format_version);
-            let res = codec::encode_block_result(&lane_buffers[s], c_opt);
-            compressed_blocks[s].push(res);
-            lane_buffers[s].clear();
+            final_blocks.push((s, lane_buffers[s].clone()));
         }
+    }
+
+    if !final_blocks.is_empty() {
+        let final_batch = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(final_blocks.len());
+            for (lane, block) in &final_blocks {
+                handles.push(scope.spawn(move || {
+                    let mut head = vec![T::SENTINEL; codec::LZV2_HASH_SIZE];
+                    let mut prev = vec![T::SENTINEL; window_size];
+                    let mut buffers = codec::CompressBuffers::new();
+                    let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version);
+                    let res = codec::encode_block_result(block, c_opt);
+                    (*lane, res)
+                }));
+            }
+            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        });
+
+        for (lane, res) in final_batch {
+            stored_size += res.len() as u64;
+            compressed_blocks[lane].push(res);
+        }
+    }
+
+    if show_progress {
+        eprint!("\r\x1b[K"); // Clear the line when done
     }
 
     // Write compressed blocks in lane order
