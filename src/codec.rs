@@ -4,8 +4,6 @@
 #![allow(dead_code)]
 #![allow(unused_assignments)]
 
-use std::collections::BinaryHeap;
-use std::cmp::Reverse;
 
 // Distance code table (deflate-style, inspired by FCD factorization)
 // code → (base_distance, extra_bits_count)
@@ -174,8 +172,7 @@ fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
     for _attempt in 0..2 {
         exceeded = false;
         let mut nodes = Vec::with_capacity(unique_count * 2);
-        let mut heap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::with_capacity(unique_count);
-
+        let mut leaves = Vec::with_capacity(unique_count);
         for sym in 0..HUFF_UINT16_ALPHABET_SIZE {
             if freq[sym] > 0 {
                 let idx = nodes.len();
@@ -185,13 +182,36 @@ fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
                     left: None,
                     right: None,
                 });
-                heap.push(Reverse((freq[sym], idx)));
+                leaves.push((freq[sym], idx));
             }
         }
+        leaves.sort_unstable_by_key(|&(f, _)| f);
 
-        while heap.len() > 1 {
-            let Reverse((f1, child1)) = heap.pop().unwrap();
-            let Reverse((f2, child2)) = heap.pop().unwrap();
+        let mut q1_idx = 0;
+        let mut q2: Vec<usize> = Vec::with_capacity(unique_count);
+        let mut q2_idx = 0;
+
+        for _ in 0..(unique_count - 1) {
+            let (f1, child1) = if q1_idx < leaves.len() && (q2_idx >= q2.len() || leaves[q1_idx].0 < nodes[q2[q2_idx]].freq) {
+                let res = leaves[q1_idx];
+                q1_idx += 1;
+                res
+            } else {
+                let idx = q2[q2_idx];
+                q2_idx += 1;
+                (nodes[idx].freq, idx)
+            };
+
+            let (f2, child2) = if q1_idx < leaves.len() && (q2_idx >= q2.len() || leaves[q1_idx].0 < nodes[q2[q2_idx]].freq) {
+                let res = leaves[q1_idx];
+                q1_idx += 1;
+                res
+            } else {
+                let idx = q2[q2_idx];
+                q2_idx += 1;
+                (nodes[idx].freq, idx)
+            };
+
             let merged_freq = f1 + f2;
             let merged_idx = nodes.len();
             nodes.push(FlatNode {
@@ -200,9 +220,13 @@ fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
                 left: Some(child1),
                 right: Some(child2),
             });
-            heap.push(Reverse((merged_freq, merged_idx)));
+            q2.push(merged_idx);
         }
-        let active_root = heap.pop().unwrap().0.1;
+        let active_root = if unique_count == 1 {
+            leaves[0].1
+        } else {
+            *q2.last().unwrap()
+        };
 
         code_lens = [0u8; HUFF_UINT16_ALPHABET_SIZE];
         huff_assign_lengths(&nodes, active_root, &mut code_lens, &mut exceeded);
@@ -461,8 +485,7 @@ fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
     for _attempt in 0..2 {
         exceeded = false;
         let mut nodes = Vec::with_capacity(unique_count * 2);
-        let mut heap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::with_capacity(unique_count);
-
+        let mut leaves = Vec::with_capacity(unique_count);
         for sym in 0..HUFF_ALPHABET_SIZE {
             if freq[sym] > 0 {
                 let idx = nodes.len();
@@ -472,13 +495,36 @@ fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
                     left: None,
                     right: None,
                 });
-                heap.push(Reverse((freq[sym], idx)));
+                leaves.push((freq[sym], idx));
             }
         }
+        leaves.sort_unstable_by_key(|&(f, _)| f);
 
-        while heap.len() > 1 {
-            let Reverse((f1, child1)) = heap.pop().unwrap();
-            let Reverse((f2, child2)) = heap.pop().unwrap();
+        let mut q1_idx = 0;
+        let mut q2: Vec<usize> = Vec::with_capacity(unique_count);
+        let mut q2_idx = 0;
+
+        for _ in 0..(unique_count - 1) {
+            let (f1, child1) = if q1_idx < leaves.len() && (q2_idx >= q2.len() || leaves[q1_idx].0 < nodes[q2[q2_idx]].freq) {
+                let res = leaves[q1_idx];
+                q1_idx += 1;
+                res
+            } else {
+                let idx = q2[q2_idx];
+                q2_idx += 1;
+                (nodes[idx].freq, idx)
+            };
+
+            let (f2, child2) = if q1_idx < leaves.len() && (q2_idx >= q2.len() || leaves[q1_idx].0 < nodes[q2[q2_idx]].freq) {
+                let res = leaves[q1_idx];
+                q1_idx += 1;
+                res
+            } else {
+                let idx = q2[q2_idx];
+                q2_idx += 1;
+                (nodes[idx].freq, idx)
+            };
+
             let merged_freq = f1 + f2;
             let merged_idx = nodes.len();
             nodes.push(FlatNode {
@@ -487,9 +533,13 @@ fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
                 left: Some(child1),
                 right: Some(child2),
             });
-            heap.push(Reverse((merged_freq, merged_idx)));
+            q2.push(merged_idx);
         }
-        let active_root = heap.pop().unwrap().0.1;
+        let active_root = if unique_count == 1 {
+            leaves[0].1
+        } else {
+            *q2.last().unwrap()
+        };
 
         code_lens = [0u8; HUFF_ALPHABET_SIZE];
         huff_assign_lengths(&nodes, active_root, &mut code_lens, &mut exceeded);
@@ -995,10 +1045,12 @@ fn deflate_style_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, Str
                 let last = *out.last().unwrap();
                 out.resize(out.len() + ml, last);
             } else {
-                let start = out.len() - dist;
-                for j in 0..ml {
-                    let val = out[start + j];
-                    out.push(val);
+                let mut copied = 0;
+                while copied < ml {
+                    let chunk = std::cmp::min(ml - copied, dist);
+                    let start = out.len() - dist;
+                    out.extend_from_within(start..start + chunk);
+                    copied += chunk;
                 }
             }
         }
