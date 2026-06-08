@@ -727,13 +727,21 @@ fn match_len_u64(data: &[u8], p: usize, i: usize, limit: usize) -> usize {
 }
 
 fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
+    let mut head = vec![-1i32; LZV2_HASH_SIZE];
+    let mut prev = vec![0i32; LZV2_WINDOW_SIZE];
+    deflate_style_encode_with_buffers(data, &mut head, &mut prev)
+}
+
+fn deflate_style_encode_with_buffers(
+    data: &[u8],
+    head: &mut [i32],
+    prev: &mut [i32],
+) -> Option<Vec<u8>> {
     let n = data.len();
     if n < 128 {
         return None;
     }
 
-    let mut head = vec![-1i32; LZV2_HASH_SIZE];
-    let mut prev = vec![0i32; LZV2_WINDOW_SIZE];
     let mut symbols = Vec::with_capacity(n);
     let mut dist_codes = Vec::with_capacity(n / 4);
 
@@ -1099,6 +1107,27 @@ where
     }
 }
 
+fn encode_block_result(block: &[u8], c_opt: Option<Vec<u8>>) -> Vec<u8> {
+    match c_opt {
+        Some(c) if c.len() < block.len() => {
+            let mut v = Vec::with_capacity(c.len() + 9);
+            v.extend_from_slice(&(c.len() as u32).to_le_bytes());
+            v.extend_from_slice(&(block.len() as u32).to_le_bytes());
+            v.push(1); // compressed flag
+            v.extend_from_slice(&c);
+            v
+        }
+        _ => {
+            let mut v = Vec::with_capacity(block.len() + 9);
+            v.extend_from_slice(&(block.len() as u32).to_le_bytes());
+            v.extend_from_slice(&(block.len() as u32).to_le_bytes());
+            v.push(0); // raw flag
+            v.extend_from_slice(block);
+            v
+        }
+    }
+}
+
 fn deflate_blocked_encode(data: &[u8]) -> Option<Vec<u8>> {
     let n = data.len();
     if n < 128 {
@@ -1106,33 +1135,58 @@ fn deflate_blocked_encode(data: &[u8]) -> Option<Vec<u8>> {
     }
 
     let num_blocks = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    let threads = num_threads(num_blocks);
 
-    // Compress each block independently and in parallel; each block gets its own
-    // optimal Huffman tree. Output bytes per block include the 9-byte header.
-    let encoded_blocks: Vec<Vec<u8>> = parallel_map(num_blocks, |b| {
-        let start = b * BLOCK_SIZE;
-        let end = std::cmp::min(start + BLOCK_SIZE, n);
-        let block = &data[start..end];
+    use std::mem::MaybeUninit;
+    let mut encoded_blocks: Vec<MaybeUninit<Vec<u8>>> = (0..num_blocks)
+        .map(|_| MaybeUninit::uninit())
+        .collect();
 
-        match deflate_style_encode(block) {
-            Some(c) if c.len() < block.len() => {
-                let mut v = Vec::with_capacity(c.len() + 9);
-                v.extend_from_slice(&(c.len() as u32).to_le_bytes());
-                v.extend_from_slice(&(block.len() as u32).to_le_bytes());
-                v.push(1); // compressed flag
-                v.extend_from_slice(&c);
-                v
-            }
-            _ => {
-                let mut v = Vec::with_capacity(block.len() + 9);
-                v.extend_from_slice(&(block.len() as u32).to_le_bytes());
-                v.extend_from_slice(&(block.len() as u32).to_le_bytes());
-                v.push(0); // raw flag
-                v.extend_from_slice(block);
-                v
-            }
+    if threads <= 1 {
+        let mut head = vec![-1i32; LZV2_HASH_SIZE];
+        let mut prev = vec![0i32; LZV2_WINDOW_SIZE];
+        for b in 0..num_blocks {
+            let start = b * BLOCK_SIZE;
+            let end = std::cmp::min(start + BLOCK_SIZE, n);
+            let block = &data[start..end];
+            head.fill(-1);
+            let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev);
+            let res = encode_block_result(block, c_opt);
+            encoded_blocks[b].write(res);
         }
-    });
+    } else {
+        let chunk_size = (num_blocks + threads - 1) / threads;
+        std::thread::scope(|s| {
+            let mut base = 0usize;
+            for chunk in encoded_blocks.chunks_mut(chunk_size) {
+                let start = base;
+                base += chunk.len();
+                s.spawn(move || {
+                    let mut head = vec![-1i32; LZV2_HASH_SIZE];
+                    let mut prev = vec![0i32; LZV2_WINDOW_SIZE];
+                    for (j, slot) in chunk.iter_mut().enumerate() {
+                        let b = start + j;
+                        let block_start = b * BLOCK_SIZE;
+                        let block_end = std::cmp::min(block_start + BLOCK_SIZE, n);
+                        let block = &data[block_start..block_end];
+                        head.fill(-1);
+                        let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev);
+                        let res = encode_block_result(block, c_opt);
+                        slot.write(res);
+                    }
+                });
+            }
+        });
+    }
+
+    let encoded_blocks: Vec<Vec<u8>> = unsafe {
+        let mut me = std::mem::ManuallyDrop::new(encoded_blocks);
+        Vec::from_raw_parts(
+            me.as_mut_ptr() as *mut Vec<u8>,
+            me.len(),
+            me.capacity(),
+        )
+    };
 
     let total: usize = 4 + encoded_blocks.iter().map(|b| b.len()).sum::<usize>();
     let mut out = Vec::with_capacity(total);
