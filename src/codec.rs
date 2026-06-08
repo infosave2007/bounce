@@ -2344,7 +2344,8 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                             let flag = header_buf[8];
                             let lane_id = std::cmp::min(header_buf[9] as usize, *stride - 1);
                             
-                            let mut comp_buf = vec![0u8; comp_size];
+                            let mut comp_buf = Vec::with_capacity(comp_size);
+                            unsafe { comp_buf.set_len(comp_size); }
                             self.inner.read_exact(&mut comp_buf)?;
                             batch_comp.push((lane_id, comp_buf, orig_size, flag));
                         }
@@ -2353,31 +2354,39 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                         if !batch_comp.is_empty() {
                             let version = self.version;
                             let decomp_batch = std::thread::scope(|scope| {
-                                let mut handles = Vec::with_capacity(batch_comp.len());
-                                for (s, comp, orig_size, flag) in batch_comp {
+                                let num_threads = std::cmp::min(concurrency, batch_comp.len());
+                                let chunk_size = (batch_comp.len() + num_threads - 1) / num_threads;
+                                let mut handles = Vec::with_capacity(num_threads);
+                                
+                                for chunk in batch_comp.chunks(chunk_size) {
+                                    let c = chunk.to_vec();
                                     handles.push(scope.spawn(move || {
-                                        let mut decoded = if flag == 1 {
-                                            deflate_style_decode_with_version(&comp, orig_size, version)
-                                                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-                                        } else {
-                                            comp
-                                        };
-                                        
-                                        if version >= 3 {
-                                            let mut p = 0u8;
-                                            for i in 0..decoded.len() {
-                                                let val = decoded[i].wrapping_add(p);
-                                                decoded[i] = val;
-                                                p = val;
+                                        let mut res = Vec::with_capacity(c.len());
+                                        for (s, comp, orig_size, flag) in c {
+                                            let mut decoded = if flag == 1 {
+                                                deflate_style_decode_with_version(&comp, orig_size, version)
+                                                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                                            } else {
+                                                comp
+                                            };
+                                            
+                                            if version >= 3 {
+                                                let mut p = 0u8;
+                                                for i in 0..decoded.len() {
+                                                    let val = decoded[i].wrapping_add(p);
+                                                    decoded[i] = val;
+                                                    p = val;
+                                                }
                                             }
+                                            res.push((s, decoded));
                                         }
-                                        
-                                        Ok::<_, io::Error>((s, decoded))
+                                        Ok::<_, io::Error>(res)
                                     }));
                                 }
-                                let mut results = Vec::with_capacity(handles.len());
+                                
+                                let mut results = Vec::with_capacity(batch_comp.len());
                                 for h in handles {
-                                    results.push(h.join().unwrap()?);
+                                    results.extend(h.join().unwrap()?);
                                 }
                                 Ok::<_, io::Error>(results)
                             })?;
@@ -2409,9 +2418,22 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                         for g_offset in 0..groups_to_process {
                             let offset_in_block = offset_start + g_offset;
                             if self.version >= 3 {
-                                for s in 0..*stride {
-                                    let val = unsafe { *block_slices.get_unchecked(s).get_unchecked(offset_in_block) };
-                                    unsafe { *buffer.get_unchecked_mut(g_offset * *stride + s) = val; }
+                                if *stride == 4 {
+                                    let v0 = unsafe { *block_slices.get_unchecked(0).get_unchecked(offset_in_block) } as u32;
+                                    let v1 = unsafe { *block_slices.get_unchecked(1).get_unchecked(offset_in_block) } as u32;
+                                    let v2 = unsafe { *block_slices.get_unchecked(2).get_unchecked(offset_in_block) } as u32;
+                                    let v3 = unsafe { *block_slices.get_unchecked(3).get_unchecked(offset_in_block) } as u32;
+                                    // Depending on endianness, we might want from_le_bytes, but we just need byte 0 to be v0, byte 1 to be v1, etc.
+                                    let combined = u32::from_le_bytes([v0 as u8, v1 as u8, v2 as u8, v3 as u8]);
+                                    unsafe {
+                                        let ptr = buffer.as_mut_ptr().add(g_offset * 4) as *mut u32;
+                                        std::ptr::write_unaligned(ptr, combined);
+                                    }
+                                } else {
+                                    for s in 0..*stride {
+                                        let val = unsafe { *block_slices.get_unchecked(s).get_unchecked(offset_in_block) };
+                                        unsafe { *buffer.get_unchecked_mut(g_offset * *stride + s) = val; }
+                                    }
                                 }
                             } else {
                                 for s in 0..*stride {
