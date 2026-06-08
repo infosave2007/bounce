@@ -123,6 +123,11 @@ echo "=================================================================="
 
 
 
+SAFETENSORS_PATH="/Users/oleg/Downloads/cortiq-coder-12b/model-mtp.safetensors"
+if [[ -f "$SAFETENSORS_PATH" ]]; then
+    bench_file "Safetensors Model Weights" "$SAFETENSORS_PATH" 1
+fi
+
 bench_file "Text (markdown corpus)"    "$BENCH_DIR/text.dat"     0
 bench_file "Source code (Go + Rust)"   "$BENCH_DIR/code.dat"     0
 bench_file "LLM weights (gguf Q4_K_M)" "$BENCH_DIR/weights.gguf" 1

@@ -168,11 +168,14 @@ fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
 
     let mut code_lens = [0u8; HUFF_UINT16_ALPHABET_SIZE];
     let mut exceeded = false;
+    use std::collections::BinaryHeap;
+    use std::cmp::Reverse;
 
     for _attempt in 0..2 {
         exceeded = false;
         let mut nodes = Vec::with_capacity(unique_count * 2);
-        let mut leaves = Vec::with_capacity(unique_count);
+        let mut heap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::with_capacity(unique_count);
+
         for sym in 0..HUFF_UINT16_ALPHABET_SIZE {
             if freq[sym] > 0 {
                 let idx = nodes.len();
@@ -182,36 +185,13 @@ fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
                     left: None,
                     right: None,
                 });
-                leaves.push((freq[sym], idx));
+                heap.push(Reverse((freq[sym], idx)));
             }
         }
-        leaves.sort_unstable_by_key(|&(f, _)| f);
 
-        let mut q1_idx = 0;
-        let mut q2: Vec<usize> = Vec::with_capacity(unique_count);
-        let mut q2_idx = 0;
-
-        for _ in 0..(unique_count - 1) {
-            let (f1, child1) = if q1_idx < leaves.len() && (q2_idx >= q2.len() || leaves[q1_idx].0 < nodes[q2[q2_idx]].freq) {
-                let res = leaves[q1_idx];
-                q1_idx += 1;
-                res
-            } else {
-                let idx = q2[q2_idx];
-                q2_idx += 1;
-                (nodes[idx].freq, idx)
-            };
-
-            let (f2, child2) = if q1_idx < leaves.len() && (q2_idx >= q2.len() || leaves[q1_idx].0 < nodes[q2[q2_idx]].freq) {
-                let res = leaves[q1_idx];
-                q1_idx += 1;
-                res
-            } else {
-                let idx = q2[q2_idx];
-                q2_idx += 1;
-                (nodes[idx].freq, idx)
-            };
-
+        while heap.len() > 1 {
+            let Reverse((f1, child1)) = heap.pop().unwrap();
+            let Reverse((f2, child2)) = heap.pop().unwrap();
             let merged_freq = f1 + f2;
             let merged_idx = nodes.len();
             nodes.push(FlatNode {
@@ -220,13 +200,9 @@ fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
                 left: Some(child1),
                 right: Some(child2),
             });
-            q2.push(merged_idx);
+            heap.push(Reverse((merged_freq, merged_idx)));
         }
-        let active_root = if unique_count == 1 {
-            leaves[0].1
-        } else {
-            *q2.last().unwrap()
-        };
+        let active_root = heap.pop().unwrap().0.1;
 
         code_lens = [0u8; HUFF_UINT16_ALPHABET_SIZE];
         huff_assign_lengths(&nodes, active_root, &mut code_lens, &mut exceeded);
@@ -457,8 +433,6 @@ fn huff_decode_uint16(data: &[u8], expected_len: usize) -> Result<Vec<u16>, Stri
 
 const HUFF_ALPHABET_SIZE: usize = 256;
 
-
-
 fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
     if data.len() < 256 {
         return None;
@@ -481,11 +455,14 @@ fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
 
     let mut code_lens = [0u8; HUFF_ALPHABET_SIZE];
     let mut exceeded = false;
+    use std::collections::BinaryHeap;
+    use std::cmp::Reverse;
 
     for _attempt in 0..2 {
         exceeded = false;
         let mut nodes = Vec::with_capacity(unique_count * 2);
-        let mut leaves = Vec::with_capacity(unique_count);
+        let mut heap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::with_capacity(unique_count);
+
         for sym in 0..HUFF_ALPHABET_SIZE {
             if freq[sym] > 0 {
                 let idx = nodes.len();
@@ -495,36 +472,13 @@ fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
                     left: None,
                     right: None,
                 });
-                leaves.push((freq[sym], idx));
+                heap.push(Reverse((freq[sym], idx)));
             }
         }
-        leaves.sort_unstable_by_key(|&(f, _)| f);
 
-        let mut q1_idx = 0;
-        let mut q2: Vec<usize> = Vec::with_capacity(unique_count);
-        let mut q2_idx = 0;
-
-        for _ in 0..(unique_count - 1) {
-            let (f1, child1) = if q1_idx < leaves.len() && (q2_idx >= q2.len() || leaves[q1_idx].0 < nodes[q2[q2_idx]].freq) {
-                let res = leaves[q1_idx];
-                q1_idx += 1;
-                res
-            } else {
-                let idx = q2[q2_idx];
-                q2_idx += 1;
-                (nodes[idx].freq, idx)
-            };
-
-            let (f2, child2) = if q1_idx < leaves.len() && (q2_idx >= q2.len() || leaves[q1_idx].0 < nodes[q2[q2_idx]].freq) {
-                let res = leaves[q1_idx];
-                q1_idx += 1;
-                res
-            } else {
-                let idx = q2[q2_idx];
-                q2_idx += 1;
-                (nodes[idx].freq, idx)
-            };
-
+        while heap.len() > 1 {
+            let Reverse((f1, child1)) = heap.pop().unwrap();
+            let Reverse((f2, child2)) = heap.pop().unwrap();
             let merged_freq = f1 + f2;
             let merged_idx = nodes.len();
             nodes.push(FlatNode {
@@ -533,13 +487,9 @@ fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
                 left: Some(child1),
                 right: Some(child2),
             });
-            q2.push(merged_idx);
+            heap.push(Reverse((merged_freq, merged_idx)));
         }
-        let active_root = if unique_count == 1 {
-            leaves[0].1
-        } else {
-            *q2.last().unwrap()
-        };
+        let active_root = heap.pop().unwrap().0.1;
 
         code_lens = [0u8; HUFF_ALPHABET_SIZE];
         huff_assign_lengths(&nodes, active_root, &mut code_lens, &mut exceeded);
@@ -587,7 +537,7 @@ fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
     }
 
     let header_len = 1 + 128;
-    let mut out = Vec::with_capacity(data.len() / 2 + header_len);
+    let mut out = Vec::with_capacity(data.len() + header_len);
     out.push(max_bits as u8);
     for i in (0..HUFF_ALPHABET_SIZE).step_by(2) {
         let hi = code_lens[i] & 0x0F;
@@ -718,6 +668,26 @@ fn lzv2_hash(data: &[u8], pos: usize) -> u32 {
     val.wrapping_mul(0x1E35A7BD) >> (32 - LZV2_HASH_BITS)
 }
 
+#[inline(always)]
+fn match_len_u64(data: &[u8], p: usize, i: usize, limit: usize) -> usize {
+    debug_assert!(p + limit <= data.len());
+    debug_assert!(i + limit <= data.len());
+    let mut l = 0;
+    while l + 8 <= limit {
+        let a = unsafe { std::ptr::read_unaligned(data.as_ptr().add(p + l) as *const u64) };
+        let b = unsafe { std::ptr::read_unaligned(data.as_ptr().add(i + l) as *const u64) };
+        if a != b {
+            let diff = a ^ b;
+            return l + (diff.trailing_zeros() / 8) as usize;
+        }
+        l += 8;
+    }
+    while l < limit && data[p + l] == data[i + l] {
+        l += 1;
+    }
+    l
+}
+
 fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
     let n = data.len();
     if n < 128 {
@@ -746,6 +716,7 @@ fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
     };
 
     let mut i = 0;
+    const GOOD_MATCH: usize = 32;
     while i < n {
         let mut best_len = 0;
         let mut best_dist = 0;
@@ -757,32 +728,25 @@ fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
             let min_pos = (i as i32) - (LZV2_WINDOW_SIZE as i32);
             let min_pos = if min_pos < 0 { 0 } else { min_pos as usize };
             let mut cl = 0;
-            while pos >= (min_pos as i32) && cl < LZV2_MAX_CHAIN {
+            let mut max_chain = LZV2_MAX_CHAIN;
+            while pos >= (min_pos as i32) && cl < max_chain {
                 let p = pos as usize;
-                if data[p] == data[i] {
-                    let mut l = 0;
-                    let mut limit = n - i;
-                    if limit > LZV2_MAX_MATCH {
-                        limit = LZV2_MAX_MATCH;
-                    }
-                    while l + 8 <= limit {
-                        let a = unsafe { std::ptr::read_unaligned(data.as_ptr().add(p + l) as *const u64) };
-                        let b = unsafe { std::ptr::read_unaligned(data.as_ptr().add(i + l) as *const u64) };
-                        if a != b {
-                            let diff = a ^ b;
-                            l += (diff.trailing_zeros() / 8) as usize;
-                            break;
-                        }
-                        l += 8;
-                    }
-                    while l < limit && data[p + l] == data[i + l] {
-                        l += 1;
-                    }
+                let mut limit = n - i;
+                if limit > LZV2_MAX_MATCH {
+                    limit = LZV2_MAX_MATCH;
+                }
+                if best_len < limit && data[p] == data[i] && data[p + best_len] == data[i + best_len] {
+                    let l = match_len_u64(data, p, i, limit);
                     if l > best_len {
                         best_len = l;
                         best_dist = i - p;
                         if l == LZV2_MAX_MATCH {
                             break;
+                        }
+                        if l >= 32 {
+                            max_chain = LZV2_MAX_CHAIN / 8;
+                        } else if l >= 8 {
+                            max_chain = LZV2_MAX_CHAIN / 2;
                         }
                     }
                 }
@@ -793,7 +757,7 @@ fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
 
         if best_len >= LZV2_MIN_MATCH {
             let mut skip = false;
-            if i + 1 + LZV2_MIN_MATCH <= n && best_len < LZV2_MAX_MATCH {
+            if best_len < GOOD_MATCH && i + 1 + LZV2_MIN_MATCH <= n && best_len < LZV2_MAX_MATCH {
                 let h2 = lzv2_hash(data, i + 1) as usize;
                 let mut pos2 = head[h2];
                 let min_pos2 = (i as i32) + 1 - (LZV2_WINDOW_SIZE as i32);
@@ -801,26 +765,14 @@ fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
                 let mut cl2 = 0;
                 while pos2 >= (min_pos2 as i32) && cl2 < LZV2_MAX_CHAIN / 2 {
                     let p = pos2 as usize;
-                    if data[p] == data[i + 1] {
-                        let mut l = 0;
-                        let mut limit = n - (i + 1);
-                        if limit > LZV2_MAX_MATCH {
-                            limit = LZV2_MAX_MATCH;
-                        }
-                        while l + 8 <= limit {
-                            let a = unsafe { std::ptr::read_unaligned(data.as_ptr().add(p + l) as *const u64) };
-                            let b = unsafe { std::ptr::read_unaligned(data.as_ptr().add(i + 1 + l) as *const u64) };
-                            if a != b {
-                                let diff = a ^ b;
-                                l += (diff.trailing_zeros() / 8) as usize;
-                                break;
-                            }
-                            l += 8;
-                        }
-                        while l < limit && data[p + l] == data[i + 1 + l] {
-                            l += 1;
-                        }
-                        if l > best_len + 1 {
+                    let mut limit = n - (i + 1);
+                    if limit > LZV2_MAX_MATCH {
+                        limit = LZV2_MAX_MATCH;
+                    }
+                    let target_len = best_len + 1;
+                    if target_len < limit && data[p] == data[i + 1] && data[p + target_len] == data[i + 1 + target_len] {
+                        let l = match_len_u64(data, p, i + 1, limit);
+                        if l > target_len {
                             best_len = l;
                             best_dist = i + 1 - p;
                             skip = true;
@@ -841,7 +793,7 @@ fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
 
                 // Lazy-2: check if we should skip i again in favor of i+1
                 let mut skip2 = false;
-                if i + 1 + LZV2_MIN_MATCH <= n && best_len < LZV2_MAX_MATCH {
+                if best_len < GOOD_MATCH && i + 1 + LZV2_MIN_MATCH <= n && best_len < LZV2_MAX_MATCH {
                     let h2 = lzv2_hash(data, i + 1) as usize;
                     let mut pos2 = head[h2];
                     let min_pos2 = (i as i32) + 1 - (LZV2_WINDOW_SIZE as i32);
@@ -849,26 +801,14 @@ fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
                     let mut cl2 = 0;
                     while pos2 >= (min_pos2 as i32) && cl2 < LZV2_MAX_CHAIN / 2 {
                         let p = pos2 as usize;
-                        if data[p] == data[i + 1] {
-                            let mut l = 0;
-                            let mut limit = n - (i + 1);
-                            if limit > LZV2_MAX_MATCH {
-                                limit = LZV2_MAX_MATCH;
-                            }
-                            while l + 8 <= limit {
-                                let a = unsafe { std::ptr::read_unaligned(data.as_ptr().add(p + l) as *const u64) };
-                                let b = unsafe { std::ptr::read_unaligned(data.as_ptr().add(i + 1 + l) as *const u64) };
-                                if a != b {
-                                    let diff = a ^ b;
-                                    l += (diff.trailing_zeros() / 8) as usize;
-                                    break;
-                                }
-                                l += 8;
-                            }
-                            while l < limit && data[p + l] == data[i + 1 + l] {
-                                l += 1;
-                            }
-                            if l > best_len + 1 {
+                        let mut limit = n - (i + 1);
+                        if limit > LZV2_MAX_MATCH {
+                            limit = LZV2_MAX_MATCH;
+                        }
+                        let target_len = best_len + 1;
+                        if target_len < limit && data[p] == data[i + 1] && data[p + target_len] == data[i + 1 + target_len] {
+                            let l = match_len_u64(data, p, i + 1, limit);
+                            if l > target_len {
                                 best_len = l;
                                 best_dist = i + 1 - p;
                                 skip2 = true;
@@ -1094,7 +1034,8 @@ where
         return (0..n).map(|i| f(i)).collect();
     }
 
-    let mut results: Vec<Option<T>> = (0..n).map(|_| None).collect();
+    use std::mem::MaybeUninit;
+    let mut results: Vec<MaybeUninit<T>> = (0..n).map(|_| MaybeUninit::uninit()).collect();
     let chunk_size = (n + threads - 1) / threads;
     let f = &f;
     std::thread::scope(|s| {
@@ -1104,12 +1045,20 @@ where
             base += chunk.len();
             s.spawn(move || {
                 for (j, slot) in chunk.iter_mut().enumerate() {
-                    *slot = Some(f(start + j));
+                    slot.write(f(start + j));
                 }
             });
         }
     });
-    results.into_iter().map(|o| o.unwrap()).collect()
+
+    unsafe {
+        let mut me = std::mem::ManuallyDrop::new(results);
+        Vec::from_raw_parts(
+            me.as_mut_ptr() as *mut T,
+            me.len(),
+            me.capacity(),
+        )
+    }
 }
 
 fn deflate_blocked_encode(data: &[u8]) -> Option<Vec<u8>> {
@@ -1271,6 +1220,69 @@ fn decode_block_into(slot: &mut [u8], comp: &[u8], orig: usize, flag: u8) -> Res
 // ══════════════════════════════════════════════════════════════
 
 fn byte_shuffle(data: &[u8], stride: usize) -> Vec<u8> {
+    if stride == 2 {
+        let n = data.len();
+        let groups = n / 2;
+        let mut out = vec![0u8; n];
+        
+        // s = 0
+        {
+            let lane = &mut out[0..groups];
+            for g in 0..groups {
+                lane[g] = data[g * 2];
+            }
+            let mut prev = 0u8;
+            for val in lane.iter_mut() {
+                let curr = *val;
+                *val = curr.wrapping_sub(prev);
+                prev = curr;
+            }
+        }
+        
+        // s = 1
+        {
+            let lane = &mut out[groups..2 * groups];
+            for g in 0..groups {
+                lane[g] = data[g * 2 + 1];
+            }
+            let mut prev = 0u8;
+            for val in lane.iter_mut() {
+                let curr = *val;
+                *val = curr.wrapping_sub(prev);
+                prev = curr;
+            }
+        }
+        
+        if n > groups * 2 {
+            out[groups * 2..n].copy_from_slice(&data[groups * 2..n]);
+        }
+        return out;
+    }
+    
+    if stride == 4 {
+        let n = data.len();
+        let groups = n / 4;
+        let mut out = vec![0u8; n];
+        
+        for s in 0..4 {
+            let lane = &mut out[s * groups..(s + 1) * groups];
+            for g in 0..groups {
+                lane[g] = data[g * 4 + s];
+            }
+            let mut prev = 0u8;
+            for val in lane.iter_mut() {
+                let curr = *val;
+                *val = curr.wrapping_sub(prev);
+                prev = curr;
+            }
+        }
+        
+        if n > groups * 4 {
+            out[groups * 4..n].copy_from_slice(&data[groups * 4..n]);
+        }
+        return out;
+    }
+
     let n = data.len();
     let groups = n / stride;
     let mut out = vec![0u8; n];
@@ -1295,6 +1307,53 @@ fn byte_shuffle(data: &[u8], stride: usize) -> Vec<u8> {
 }
 
 fn byte_unshuffle(data: &[u8], stride: usize) -> Vec<u8> {
+    if stride == 2 {
+        let n = data.len();
+        let groups = n / 2;
+        let mut out = vec![0u8; n];
+        
+        let lane0 = &data[0..groups];
+        let mut accum0 = 0u8;
+        for g in 0..groups {
+            accum0 = accum0.wrapping_add(lane0[g]);
+            out[g * 2] = accum0;
+        }
+        
+        let lane1 = &data[groups..2 * groups];
+        let mut accum1 = 0u8;
+        for g in 0..groups {
+            accum1 = accum1.wrapping_add(lane1[g]);
+            out[g * 2 + 1] = accum1;
+        }
+        
+        let base = groups * 2;
+        if n > base {
+            out[base..n].copy_from_slice(&data[base..n]);
+        }
+        return out;
+    }
+    
+    if stride == 4 {
+        let n = data.len();
+        let groups = n / 4;
+        let mut out = vec![0u8; n];
+        
+        for s in 0..4 {
+            let lane = &data[s * groups..(s + 1) * groups];
+            let mut accum = 0u8;
+            for g in 0..groups {
+                accum = accum.wrapping_add(lane[g]);
+                out[g * 4 + s] = accum;
+            }
+        }
+        
+        let base = groups * 4;
+        if n > base {
+            out[base..n].copy_from_slice(&data[base..n]);
+        }
+        return out;
+    }
+
     let n = data.len();
     let groups = n / stride;
     let mut out = vec![0u8; n];

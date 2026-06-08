@@ -119,6 +119,17 @@ This leads to three practical principles implemented in `bounce`:
 2. **Structural Resonance:** Before entropy coding, data is restructured to maximize its internal periodicity (structural "resonance")—hence the byte-shuffle for floating-point weights and block-wise Huffman trees that adapt to local statistics.
 3. **Minimum Redundancy Point:** Among several reversible transformations, the one yielding the smallest footprint is automatically chosen—representing the empirical "bounce point" for the given file.
 
+The theoretical foundation of this algorithm is based on the **Vacuum Mass Fraction (VMF)** and **Null-Vector Gravity (NVG)** framework (see the [VMF Framework GitHub repository](https://github.com/infosave2007/vmf)). 
+
+### 1. Golden Ratio Threshold ($\rho_c \approx 0.382$)
+The sparsity and entropy transition threshold is mathematically derived from the self-similarity of phase boundary states in VMF. The golden ratio $\phi = \frac{1+\sqrt{5}}{2} \approx 1.618$ satisfies $\phi^2 - \phi - 1 = 0$, and its conjugate $\phi^{-1} \approx 0.618$ governs phase boundary conservation. The critical transition density (the threshold below which static codebooks lose efficiency to adaptive entropy coding) is:
+$$\rho_c = 1 - \phi^{-1} = \phi^{-2} = \frac{3 - \sqrt{5}}{2} \approx 0.382$$
+
+### 2. Ultimate Compression Limit
+In the VMF/NVG framework, the physical limit of matter compression is bounded by the complete melting of the QCD vacuum condensate amplitude ($W \to 0$). Collapse halts and bounces at the critical bounce density:
+$$\rho_{\rm bounce} = \frac{M_{\Omega,0}^4}{(\hbar c)^3} \approx 7.09 \times 10^4 \text{ MeV/fm}^3$$
+At this density, the Strong Energy Condition (SEC) is violated ($\varepsilon + 3P < 0$), preventing any physical singularity.
+
 The theoretical foundation of this algorithm was first published by the author in the journal of **Saint Petersburg State University (SPbSU) in 2007**. The current implementation represents its engineering evolution applied to file and neural network weight compression. The task routing mechanism between reversible transformations is covered by the author's patent (see [NOTICE](NOTICE)).
 
 ---
@@ -131,7 +142,13 @@ The Big Bounce codec is a self-contained DEFLATE-like implementation that applie
 2. **Huffman coding** encodes literals and distance codes (with an optimal tree generated per 32 KB block).
 3. **Byte-shuffle** transforms (stride = 2 and 4) expose the structural redundancy of binary data (such as float32 weights in neural networks).
 
-For each file, the engine tries methods `plain`, `blocked`, `shuf+defl`, `shuf+blk`, `shuf2+defl`, `shuf2+blk` and picks the best one. If the file is incompressible (e.g., already compressed or random data), it is saved unmodified (`stored` mode), ensuring the archive is never larger than the sum of input files plus small headers.
+### Patented Task Type Detection and Routing (Smart Routing)
+
+The selection of the optimal compression method for each file or data block is governed by a patented mechanism for task type classification and transformation routing (see [NOTICE](NOTICE)):
+
+1. **Task Type Detection (Prior Scoring):** Before compression begins, the system evaluates a data prior profile based on statistical characteristics: Shannon entropy, bit density, byte repetition spectrum, delta (difference) correlations, and value locality. This profile acts as an embedding, identifying the structural task type of the data.
+2. **Method Routing (Resonance Routing):** The resulting feature profile gates (enables or disables) data passage through various "topologies" (LZ77, byte-shuffles with strides 2/4, or raw storage), minimizing search space complexity by eliminating unproductive compression pipelines.
+3. **Dynamic Block-Level Partitioning:** For large files, the router dynamically restricts the search space to parallelized block-wise modes (`blocked`), dividing the payload to process blocks concurrently. If the final routed output exceeds the input size, it falls back to raw byte storage (`stored`), preventing archive bloat.
 
 Large files (> 1 MB) are processed using block-wise methods only, enabling parallel processing across CPU cores.
 
@@ -154,11 +171,23 @@ Or to run for **bounce only** to skip other utilities:
 bash bounce/benchmark.sh --only-bounce
 ```
 
+### Safetensors Model Weights — 450.05 MB (`model-mtp.safetensors`)
+
+Unquantized IEEE-754 neural network weights. This demonstrates the efficiency of our `byte_shuffle` transform on structured float structures.
+
+| Tool | Size | Ratio | C (Compression) | D (Decompression) |
+|------|-----:|------:|----------------:|------------------:|
+| **bounce** | **344,830,307** | **73.1%** | **112.7 MB/s** | **657.7 MB/s** |
+| gzip -9 | 374,391,731 | 79.3% | 18.1 MB/s | 352.9 MB/s |
+| lz4 -9 | 468,560,164 | 99.3% | 189.5 MB/s | 2044.8 MB/s |
+| zstd -19 | 359,412,232 | 76.2% | 12.4 MB/s | 383.5 MB/s |
+| brotli -q 5 | 368,604,076 | 78.1% | 97.7 MB/s | 217.8 MB/s |
+
 ### Text — 1.32 MB (Repeating Markdown Corpus)
 
 | Tool | Size | Ratio | C (Compression) | D (Decompression) |
 |------|-----:|------:|----------------:|------------------:|
-| **bounce** | 466,947 | 33.8% | 17.4 MB/s | 34.4 MB/s |
+| **bounce** | 467,560 | 33.9% | 3.7 MB/s | 36.6 MB/s |
 | gzip -9 | 404,664 | 29.3% | 15.5 MB/s | 36.0 MB/s |
 | lz4 -9 | 456,579 | 33.1% | 20.4 MB/s | 36.7 MB/s |
 | zstd -19 | 45,772 | 3.3% | 18.9 MB/s | 35.8 MB/s |
@@ -170,7 +199,7 @@ bash bounce/benchmark.sh --only-bounce
 
 | Tool | Size | Ratio | C (Compression) | D (Decompression) |
 |------|-----:|------:|----------------:|------------------:|
-| **bounce** | 100,126 | 18.9% | 4.5 MB/s | 13.5 MB/s |
+| **bounce** | 100,265 | 18.9% | 8.1 MB/s | 14.2 MB/s |
 | gzip -9 | 101,897 | 19.2% | 10.3 MB/s | 14.6 MB/s |
 | lz4 -9 | 122,076 | 23.0% | 12.1 MB/s | 14.7 MB/s |
 | zstd -19 | 84,994 | 16.0% | 4.7 MB/s | 14.6 MB/s |
@@ -184,7 +213,7 @@ Quantized weights are close to random data—serving as an honest test on a larg
 
 | Tool | Size | Ratio | C (Compression) | D (Decompression) |
 |------|-----:|------:|----------------:|------------------:|
-| **bounce** | 1,066,254,392 | 99.3% | 123.5 MB/s | **1462.2 MB/s** |
+| **bounce** | 1,066,598,492 | 99.3% | 155.2 MB/s | 803.9 MB/s |
 | gzip -9 | 1,063,316,152 | 99.0% | 53.1 MB/s | 510.2 MB/s |
 | lz4 -9 | 1,066,181,306 | 99.3% | 346.4 MB/s | **4102.7 MB/s** |
 | zstd -19 -T0 | 1,060,561,565 | 98.8% | 22.9 MB/s | 1258.9 MB/s |
@@ -225,4 +254,4 @@ Tests cover: round-trip compression/decompression, known CRC-32 vectors, full CL
 
 Distributed under the **Apache License 2.0**—see [LICENSE](LICENSE).
 
-The task routing mechanism used in this project is covered by the author's patent. See [NOTICE](NOTICE).
+At the heart of one of the key ideas of the project, the Signal Reconstruction Resonance method (the task routing mechanism), lies the author's US patent application: **USA 19/452,440 dated Jan 19, 2026**. See [NOTICE](NOTICE).
