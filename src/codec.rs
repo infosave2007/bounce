@@ -288,6 +288,131 @@ struct TableEntry {
     bits: u8,
 }
 
+fn encode_code_lens(lens: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut bit_buf = 0u64;
+    let mut bit_pos = 0usize;
+
+    let write_bits = |val: u32, n: usize, out: &mut Vec<u8>, bit_buf: &mut u64, bit_pos: &mut usize| {
+        *bit_buf = (*bit_buf << n) | (val as u64 & ((1 << n) - 1));
+        *bit_pos += n;
+        while *bit_pos >= 8 {
+            *bit_pos -= 8;
+            out.push((*bit_buf >> *bit_pos) as u8);
+        }
+    };
+
+    let mut i = 0;
+    let mut prev = None;
+    while i < lens.len() {
+        let val = lens[i];
+        if val == 0 {
+            let mut run = 0;
+            while i + run < lens.len() && lens[i + run] == 0 {
+                run += 1;
+            }
+            i += run;
+            let mut remaining = run;
+            while remaining > 0 {
+                if remaining >= 11 {
+                    let count = std::cmp::min(remaining, 138);
+                    write_bits(18, 5, &mut out, &mut bit_buf, &mut bit_pos);
+                    write_bits((count - 11) as u32, 7, &mut out, &mut bit_buf, &mut bit_pos);
+                    remaining -= count;
+                } else if remaining >= 3 {
+                    let count = std::cmp::min(remaining, 10);
+                    write_bits(17, 5, &mut out, &mut bit_buf, &mut bit_pos);
+                    write_bits((count - 3) as u32, 3, &mut out, &mut bit_buf, &mut bit_pos);
+                    remaining -= count;
+                } else {
+                    write_bits(0, 5, &mut out, &mut bit_buf, &mut bit_pos);
+                    remaining -= 1;
+                }
+            }
+            prev = Some(0);
+        } else {
+            let mut run = 1;
+            while i + run < lens.len() && lens[i + run] == val {
+                run += 1;
+            }
+            if prev == Some(val) && run >= 3 {
+                let count = std::cmp::min(run, 6);
+                write_bits(16, 5, &mut out, &mut bit_buf, &mut bit_pos);
+                write_bits((count - 3) as u32, 2, &mut out, &mut bit_buf, &mut bit_pos);
+                i += count;
+            } else {
+                write_bits(val as u32, 5, &mut out, &mut bit_buf, &mut bit_pos);
+                prev = Some(val);
+                i += 1;
+            }
+        }
+    }
+
+    if bit_pos > 0 {
+        out.push((bit_buf << (8 - bit_pos)) as u8);
+    }
+    out
+}
+
+fn decode_code_lens(encoded: &[u8], out: &mut [u8]) -> Result<(), String> {
+    let mut reader = BitReader::new(encoded);
+    let mut i = 0;
+    let mut prev = None;
+
+    while i < out.len() {
+        let sym = reader.peek(5);
+        reader.consume(5);
+
+        if sym <= 15 {
+            out[i] = sym as u8;
+            prev = Some(sym as u8);
+            i += 1;
+        } else if sym == 16 {
+            let extra = reader.peek(2);
+            reader.consume(2);
+            let count = 3 + extra as usize;
+            let p = match prev {
+                Some(p) => p,
+                None => return Err("RLE decode: code 16 repeat with no previous value".to_string()),
+            };
+            if i + count > out.len() {
+                return Err("RLE decode: repeat exceeds length".to_string());
+            }
+            for _ in 0..count {
+                out[i] = p;
+                i += 1;
+            }
+        } else if sym == 17 {
+            let extra = reader.peek(3);
+            reader.consume(3);
+            let count = 3 + extra as usize;
+            if i + count > out.len() {
+                return Err("RLE decode: repeat exceeds length".to_string());
+            }
+            for _ in 0..count {
+                out[i] = 0;
+                i += 1;
+            }
+            prev = Some(0);
+        } else if sym == 18 {
+            let extra = reader.peek(7);
+            reader.consume(7);
+            let count = 11 + extra as usize;
+            if i + count > out.len() {
+                return Err("RLE decode: repeat exceeds length".to_string());
+            }
+            for _ in 0..count {
+                out[i] = 0;
+                i += 1;
+            }
+            prev = Some(0);
+        } else {
+            return Err(format!("RLE decode: invalid symbol {}", sym));
+        }
+    }
+    Ok(())
+}
+
 const HUFF_UINT16_ALPHABET_SIZE: usize = 286;
 
 fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
@@ -344,14 +469,11 @@ fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
         }
     }
 
-    let header_len = 1 + 143;
-    let mut out = Vec::with_capacity(data.len() + header_len);
+    let rle_data = encode_code_lens(&code_lens);
+    let mut out = Vec::with_capacity(data.len() + 2 + rle_data.len());
     out.push(max_bits as u8);
-    for i in (0..HUFF_UINT16_ALPHABET_SIZE).step_by(2) {
-        let hi = code_lens[i] & 0x0F;
-        let lo = code_lens[i + 1] & 0x0F;
-        out.push((hi << 4) | lo);
-    }
+    out.push(rle_data.len() as u8);
+    out.extend_from_slice(&rle_data);
 
     let mut bit_buf = 0u64;
     let mut bit_pos = 0usize;
@@ -444,8 +566,7 @@ impl<'a> BitReader<'a> {
 }
 
 fn huff_decode_uint16(data: &[u8], expected_len: usize) -> Result<Vec<u16>, String> {
-    let header_len = 1 + 143;
-    if data.len() < header_len {
+    if data.len() < 2 {
         return Err("huffUint16: data too short for header".to_string());
     }
 
@@ -454,11 +575,14 @@ fn huff_decode_uint16(data: &[u8], expected_len: usize) -> Result<Vec<u16>, Stri
         return Err(format!("huffUint16: invalid maxBits {}", max_bits));
     }
 
-    let mut code_lens = [0u8; HUFF_UINT16_ALPHABET_SIZE];
-    for i in 0..143 {
-        code_lens[i * 2] = (data[1 + i] >> 4) & 0x0F;
-        code_lens[i * 2 + 1] = data[1 + i] & 0x0F;
+    let rle_len = data[1] as usize;
+    let header_len = 2 + rle_len;
+    if data.len() < header_len {
+        return Err("huffUint16: data too short for RLE header".to_string());
     }
+
+    let mut code_lens = [0u8; HUFF_UINT16_ALPHABET_SIZE];
+    decode_code_lens(&data[2..header_len], &mut code_lens)?;
     let bitstream = &data[header_len..];
 
     let mut bl_count = [0usize; 16];
@@ -611,14 +735,11 @@ fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
         }
     }
 
-    let header_len = 1 + 128;
-    let mut out = Vec::with_capacity(data.len() + header_len);
+    let rle_data = encode_code_lens(&code_lens);
+    let mut out = Vec::with_capacity(data.len() + 2 + rle_data.len());
     out.push(max_bits as u8);
-    for i in (0..HUFF_ALPHABET_SIZE).step_by(2) {
-        let hi = code_lens[i] & 0x0F;
-        let lo = code_lens[i + 1] & 0x0F;
-        out.push((hi << 4) | lo);
-    }
+    out.push(rle_data.len() as u8);
+    out.extend_from_slice(&rle_data);
 
     let mut bit_buf = 0u64;
     let mut bit_pos = 0usize;
@@ -642,8 +763,7 @@ fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
-    let header_len = 1 + 128;
-    if data.len() < header_len {
+    if data.len() < 2 {
         return Err("huff: data too short for header".to_string());
     }
 
@@ -652,11 +772,14 @@ fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
         return Err(format!("huff: invalid maxBits {}", max_bits));
     }
 
-    let mut code_lens = [0u8; HUFF_ALPHABET_SIZE];
-    for i in 0..128 {
-        code_lens[i * 2] = (data[1 + i] >> 4) & 0x0F;
-        code_lens[i * 2 + 1] = data[1 + i] & 0x0F;
+    let rle_len = data[1] as usize;
+    let header_len = 2 + rle_len;
+    if data.len() < header_len {
+        return Err("huff: data too short for RLE header".to_string());
     }
+
+    let mut code_lens = [0u8; HUFF_ALPHABET_SIZE];
+    decode_code_lens(&data[2..header_len], &mut code_lens)?;
     let bitstream = &data[header_len..];
 
     let mut bl_count = [0usize; 16];
