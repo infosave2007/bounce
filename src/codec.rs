@@ -742,6 +742,7 @@ fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
         }
 
         if best_len >= LZV2_MIN_MATCH {
+            let mut skip = false;
             if i + 1 + LZV2_MIN_MATCH <= n && best_len < LZV2_MAX_MATCH {
                 let h2 = lzv2_hash(data, i + 1) as usize;
                 let mut pos2 = head[h2];
@@ -770,18 +771,71 @@ fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
                             l += 1;
                         }
                         if l > best_len + 1 {
-                            symbols.push(data[i] as u16);
-                            i += 1;
                             best_len = l;
-                            best_dist = i - p;
-                            let h3 = lzv2_hash(data, i) as usize;
-                            prev[i & (LZV2_WINDOW_SIZE - 1)] = head[h3];
-                            head[h3] = i as i32;
+                            best_dist = i + 1 - p;
+                            skip = true;
                             break;
                         }
                     }
                     pos2 = prev[p & (LZV2_WINDOW_SIZE - 1)];
                     cl2 += 1;
+                }
+            }
+
+            if skip {
+                symbols.push(data[i] as u16);
+                i += 1;
+                let h3 = lzv2_hash(data, i) as usize;
+                prev[i & (LZV2_WINDOW_SIZE - 1)] = head[h3];
+                head[h3] = i as i32;
+
+                // Lazy-2: check if we should skip i again in favor of i+1
+                let mut skip2 = false;
+                if i + 1 + LZV2_MIN_MATCH <= n && best_len < LZV2_MAX_MATCH {
+                    let h2 = lzv2_hash(data, i + 1) as usize;
+                    let mut pos2 = head[h2];
+                    let min_pos2 = (i as i32) + 1 - (LZV2_WINDOW_SIZE as i32);
+                    let min_pos2 = if min_pos2 < 0 { 0 } else { min_pos2 as usize };
+                    let mut cl2 = 0;
+                    while pos2 >= (min_pos2 as i32) && cl2 < LZV2_MAX_CHAIN / 2 {
+                        let p = pos2 as usize;
+                        if data[p] == data[i + 1] {
+                            let mut l = 0;
+                            let mut limit = n - (i + 1);
+                            if limit > LZV2_MAX_MATCH {
+                                limit = LZV2_MAX_MATCH;
+                            }
+                            while l + 8 <= limit {
+                                let a = unsafe { std::ptr::read_unaligned(data.as_ptr().add(p + l) as *const u64) };
+                                let b = unsafe { std::ptr::read_unaligned(data.as_ptr().add(i + 1 + l) as *const u64) };
+                                if a != b {
+                                    let diff = a ^ b;
+                                    l += (diff.trailing_zeros() / 8) as usize;
+                                    break;
+                                }
+                                l += 8;
+                            }
+                            while l < limit && data[p + l] == data[i + 1 + l] {
+                                l += 1;
+                            }
+                            if l > best_len + 1 {
+                                best_len = l;
+                                best_dist = i + 1 - p;
+                                skip2 = true;
+                                break;
+                            }
+                        }
+                        pos2 = prev[p & (LZV2_WINDOW_SIZE - 1)];
+                        cl2 += 1;
+                    }
+                }
+
+                if skip2 {
+                    symbols.push(data[i] as u16);
+                    i += 1;
+                    let h3 = lzv2_hash(data, i) as usize;
+                    prev[i & (LZV2_WINDOW_SIZE - 1)] = head[h3];
+                    head[h3] = i as i32;
                 }
             }
 
@@ -937,6 +991,9 @@ fn deflate_style_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, Str
             if dist >= ml {
                 let start = out.len() - dist;
                 out.extend_from_within(start..start + ml);
+            } else if dist == 1 {
+                let last = *out.last().unwrap();
+                out.resize(out.len() + ml, last);
             } else {
                 let start = out.len() - dist;
                 for j in 0..ml {
