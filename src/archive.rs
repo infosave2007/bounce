@@ -1186,11 +1186,16 @@ fn extract_entry_payload<R: Read + Seek + Send, W: Write>(
 
         let start_time = std::time::Instant::now();
         let (tx, rx) = std::sync::mpsc::sync_channel::<io::Result<Option<Vec<u8>>>>(8);
+        let (tx_pool, rx_pool) = std::sync::mpsc::sync_channel::<Vec<u8>>(16);
+        for _ in 0..16 {
+            tx_pool.send(vec![0u8; 1024 * 1024]).unwrap();
+        }
 
         let res = std::thread::scope(|s| {
             let reader_thread = s.spawn(move || {
                 loop {
-                    let mut buf = vec![0u8; 1024 * 1024]; // 1MB buffers
+                    let mut buf = rx_pool.recv().unwrap();
+                    unsafe { buf.set_len(1024 * 1024); } // safe because it was fully initialized before
                     match dec.read(&mut buf) {
                         Ok(n) if n == 0 => {
                             let _ = tx.send(Ok(None));
@@ -1222,6 +1227,7 @@ fn extract_entry_payload<R: Read + Seek + Send, W: Write>(
                         }
                         decomp_bytes += buf.len() as u64;
                         print_progress("extracting", &meta.path, decomp_bytes, meta.orig_size, 0, start_time);
+                        let _ = tx_pool.send(buf);
                     }
                     Ok(None) => break,
                     Err(e) => return Err(e),
