@@ -334,19 +334,43 @@ fn unpack_table_entry(entry: u16) -> (u16, u8) {
 
 const SUB_TABLE_INDICATOR: u8 = 127;
 
-fn encode_code_lens(lens: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut bit_buf = 0u64;
-    let mut bit_pos = 0usize;
+struct BitWriter {
+    out: Vec<u8>,
+    bit_buf: u64,
+    bit_pos: usize,
+}
 
-    let write_bits = |val: u32, n: usize, out: &mut Vec<u8>, bit_buf: &mut u64, bit_pos: &mut usize| {
-        *bit_buf = (*bit_buf << n) | (val as u64 & ((1 << n) - 1));
-        *bit_pos += n;
-        while *bit_pos >= 8 {
-            *bit_pos -= 8;
-            out.push((*bit_buf >> *bit_pos) as u8);
+impl BitWriter {
+    #[inline(always)]
+    fn new() -> Self {
+        Self {
+            out: Vec::new(),
+            bit_buf: 0,
+            bit_pos: 0,
         }
-    };
+    }
+
+    #[inline(always)]
+    fn write(&mut self, val: u32, n: usize) {
+        self.bit_buf = (self.bit_buf << n) | (val as u64 & ((1 << n) - 1));
+        self.bit_pos += n;
+        while self.bit_pos >= 8 {
+            self.bit_pos -= 8;
+            self.out.push((self.bit_buf >> self.bit_pos) as u8);
+        }
+    }
+
+    #[inline(always)]
+    fn finish(mut self) -> Vec<u8> {
+        if self.bit_pos > 0 {
+            self.out.push((self.bit_buf << (8 - self.bit_pos)) as u8);
+        }
+        self.out
+    }
+}
+
+fn encode_code_lens(lens: &[u8]) -> Vec<u8> {
+    let mut writer = BitWriter::new();
 
     let mut i = 0;
     let mut prev = None;
@@ -362,16 +386,16 @@ fn encode_code_lens(lens: &[u8]) -> Vec<u8> {
             while remaining > 0 {
                 if remaining >= 11 {
                     let count = std::cmp::min(remaining, 138);
-                    write_bits(18, 5, &mut out, &mut bit_buf, &mut bit_pos);
-                    write_bits((count - 11) as u32, 7, &mut out, &mut bit_buf, &mut bit_pos);
+                    writer.write(18, 5);
+                    writer.write((count - 11) as u32, 7);
                     remaining -= count;
                 } else if remaining >= 3 {
                     let count = std::cmp::min(remaining, 10);
-                    write_bits(17, 5, &mut out, &mut bit_buf, &mut bit_pos);
-                    write_bits((count - 3) as u32, 3, &mut out, &mut bit_buf, &mut bit_pos);
+                    writer.write(17, 5);
+                    writer.write((count - 3) as u32, 3);
                     remaining -= count;
                 } else {
-                    write_bits(0, 5, &mut out, &mut bit_buf, &mut bit_pos);
+                    writer.write(0, 5);
                     remaining -= 1;
                 }
             }
@@ -383,21 +407,18 @@ fn encode_code_lens(lens: &[u8]) -> Vec<u8> {
             }
             if prev == Some(val) && run >= 3 {
                 let count = std::cmp::min(run, 6);
-                write_bits(16, 5, &mut out, &mut bit_buf, &mut bit_pos);
-                write_bits((count - 3) as u32, 2, &mut out, &mut bit_buf, &mut bit_pos);
+                writer.write(16, 5);
+                writer.write((count - 3) as u32, 2);
                 i += count;
             } else {
-                write_bits(val as u32, 5, &mut out, &mut bit_buf, &mut bit_pos);
+                writer.write(val as u32, 5);
                 prev = Some(val);
                 i += 1;
             }
         }
     }
 
-    if bit_pos > 0 {
-        out.push((bit_buf << (8 - bit_pos)) as u8);
-    }
-    out
+    writer.finish()
 }
 
 fn decode_code_lens(encoded: &[u8], out: &mut [u8]) -> Result<(), String> {
@@ -1128,6 +1149,9 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
                 if limit > LZV2_MAX_MATCH {
                     limit = LZV2_MAX_MATCH;
                 }
+                if p >= i {
+                    break;
+                }
                 if best_len < limit && data[p] == data[i] && data[p + best_len] == data[i + best_len] {
                     let l = match_len_u64(data, p, i, limit);
                     if l > best_len {
@@ -1162,6 +1186,9 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
                         limit = LZV2_MAX_MATCH;
                     }
                     let target_len = best_len + 1;
+                    if p >= i + 1 {
+                        break;
+                    }
                     if target_len < limit && data[p] == data[i + 1] && data[p + target_len] == data[i + 1 + target_len] {
                         let l = match_len_u64(data, p, i + 1, limit);
                         if l > target_len {
@@ -1197,6 +1224,9 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
                             limit = LZV2_MAX_MATCH;
                         }
                         let target_len = best_len + 1;
+                        if p >= i + 1 {
+                            break;
+                        }
                         if target_len < limit && data[p] == data[i + 1] && data[p + target_len] == data[i + 1 + target_len] {
                             let l = match_len_u64(data, p, i + 1, limit);
                             if l > target_len {
@@ -1521,7 +1551,7 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
             let start = b * block_size;
             let end = std::cmp::min(start + block_size, n);
             let block = &data[start..end];
-            head.fill(T::SENTINEL);
+            // head.fill(T::SENTINEL);
             let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version);
             let res = encode_block_result(block, c_opt);
             encoded_blocks[b].write(res);
@@ -1542,7 +1572,7 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
                         let block_start = b * block_size;
                         let block_end = std::cmp::min(block_start + block_size, n);
                         let block = &data[block_start..block_end];
-                        head.fill(T::SENTINEL);
+                        // head.fill(T::SENTINEL);
                         let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version);
                         let res = encode_block_result(block, c_opt);
                         slot.write(res);

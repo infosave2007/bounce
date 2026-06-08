@@ -278,7 +278,7 @@ fn compress_stream_blocked<R: Read, W: Write, T: codec::TableIndex>(
         *crc = crc32_update(*crc, block);
         *orig_size += block_len as u64;
 
-        head.fill(T::SENTINEL);
+        // head.fill(T::SENTINEL);
         let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version);
         let res = codec::encode_block_result(block, c_opt);
         w.write_all(&res)?;
@@ -308,8 +308,8 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
     let mut compressed_blocks = vec![Vec::new(); stride];
 
     let mut chunk = vec![0u8; block_size * stride];
-    let mut head = vec![T::SENTINEL; codec::LZV2_HASH_SIZE];
-    let mut prev = vec![T::SENTINEL; window_size];
+    let mut heads = vec![vec![T::SENTINEL; codec::LZV2_HASH_SIZE]; stride];
+    let mut prevs = vec![vec![T::SENTINEL; window_size]; stride];
     let mut buffers = codec::CompressBuffers::new();
 
     let mut bytes_processed = 0;
@@ -355,8 +355,7 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
                 // Check if lane buffers are full
                 for s in 0..stride {
                     if lane_buffers[s].len() >= block_size {
-                        head.fill(T::SENTINEL);
-                        let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut head, &mut prev, &mut buffers, window_size, format_version);
+                        let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut heads[s], &mut prevs[s], &mut buffers, window_size, format_version);
                         let res = codec::encode_block_result(&lane_buffers[s], c_opt);
                         compressed_blocks[s].push(res);
                         lane_buffers[s].clear();
@@ -370,8 +369,7 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
     // Compress any remaining bytes in lane buffers
     for s in 0..stride {
         if !lane_buffers[s].is_empty() {
-            head.fill(T::SENTINEL);
-            let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut head, &mut prev, &mut buffers, window_size, format_version);
+            let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut heads[s], &mut prevs[s], &mut buffers, window_size, format_version);
             let res = codec::encode_block_result(&lane_buffers[s], c_opt);
             compressed_blocks[s].push(res);
             lane_buffers[s].clear();
