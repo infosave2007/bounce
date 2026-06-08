@@ -184,7 +184,7 @@ Quantized weights are close to random data—serving as an honest test on a larg
 
 | Tool | Size | Ratio | C (Compression) | D (Decompression) |
 |------|-----:|------:|----------------:|------------------:|
-| **bounce** | 1,066,254,392 | 99.3% | 152.2 MB/s | **1435.2 MB/s** |
+| **bounce** | 1,066,254,392 | 99.3% | 161.2 MB/s | **1435.2 MB/s** |
 | gzip -9 | 1,063,316,152 | 99.0% | 42.2 MB/s | 513.4 MB/s |
 | lz4 -9 | 1,066,181,306 | 99.3% | 214.9 MB/s | **3435.4 MB/s** |
 | zstd -19 -T0 | 1,060,561,565 | 98.8% | 21.0 MB/s | 1247.8 MB/s |

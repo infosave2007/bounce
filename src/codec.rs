@@ -69,18 +69,38 @@ const LEN_CODE_TABLE: [(u16, u8); 29] = [
     (258, 0),                                                       // code 28: length 258 exact
 ];
 
+const LEN_LOOKUP: [u8; 259] = build_len_lookup();
+
+const fn build_len_lookup() -> [u8; 259] {
+    let mut lookup = [0u8; 259];
+    let mut i = 0;
+    while i < 259 {
+        let length = i as u16;
+        if length >= 258 {
+            lookup[i] = 28;
+        } else {
+            let mut code = 0;
+            let mut c = 0;
+            while c < 28 {
+                if length >= LEN_CODE_TABLE[c].0 {
+                    code = c as u8;
+                }
+                c += 1;
+            }
+            lookup[i] = code;
+        }
+        i += 1;
+    }
+    lookup
+}
+
 fn len_to_code(length: u16) -> (u8, u16, u8) {
     if length >= 258 {
         return (28, 0, 0);
     }
-    for i in (0..28).rev() {
-        if length >= LEN_CODE_TABLE[i].0 {
-            let n_extra = LEN_CODE_TABLE[i].1;
-            let extra = length - LEN_CODE_TABLE[i].0;
-            return (i as u8, extra, n_extra);
-        }
-    }
-    (0, 0, 0)
+    let code = LEN_LOOKUP[length as usize];
+    let (base, n_extra) = LEN_CODE_TABLE[code as usize];
+    (code, length - base, n_extra)
 }
 
 fn code_to_len(code: u8, extra: u16) -> u16 {
@@ -100,25 +120,29 @@ struct FlatNode {
 
 const HUFF_UINT16_ALPHABET_SIZE: usize = 286;
 
-fn huff_assign_lengths(nodes: &[FlatNode], node_idx: usize, depth: u8, code_lens: &mut [u8], exceeded: &mut bool) {
-    let node = &nodes[node_idx];
-    if node.sym >= 0 {
-        let mut d = depth;
-        if d > 15 {
-            *exceeded = true;
-            d = 15;
+fn huff_assign_lengths(nodes: &[FlatNode], root_idx: usize, code_lens: &mut [u8], exceeded: &mut bool) {
+    let mut stack = Vec::with_capacity(64);
+    stack.push((root_idx, 0u8));
+    while let Some((idx, depth)) = stack.pop() {
+        let node = &nodes[idx];
+        if node.sym >= 0 {
+            let mut d = depth;
+            if d > 15 {
+                *exceeded = true;
+                d = 15;
+            }
+            if d == 0 {
+                d = 1;
+            }
+            code_lens[node.sym as usize] = d;
+        } else {
+            if let Some(right) = node.right {
+                stack.push((right, depth + 1));
+            }
+            if let Some(left) = node.left {
+                stack.push((left, depth + 1));
+            }
         }
-        if d == 0 {
-            d = 1;
-        }
-        code_lens[node.sym as usize] = d;
-        return;
-    }
-    if let Some(left) = node.left {
-        huff_assign_lengths(nodes, left, depth + 1, code_lens, exceeded);
-    }
-    if let Some(right) = node.right {
-        huff_assign_lengths(nodes, right, depth + 1, code_lens, exceeded);
     }
 }
 
@@ -181,7 +205,7 @@ fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
         let active_root = heap.pop().unwrap().0.1;
 
         code_lens = [0u8; HUFF_UINT16_ALPHABET_SIZE];
-        huff_assign_lengths(&nodes, active_root, 0, &mut code_lens, &mut exceeded);
+        huff_assign_lengths(&nodes, active_root, &mut code_lens, &mut exceeded);
 
         if !exceeded {
             break;
@@ -468,7 +492,7 @@ fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
         let active_root = heap.pop().unwrap().0.1;
 
         code_lens = [0u8; HUFF_ALPHABET_SIZE];
-        huff_assign_lengths(&nodes, active_root, 0, &mut code_lens, &mut exceeded);
+        huff_assign_lengths(&nodes, active_root, &mut code_lens, &mut exceeded);
 
         if !exceeded {
             break;
@@ -890,10 +914,15 @@ fn deflate_style_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, Str
             if dist > out.len() {
                 return Err(format!("deflateStyle: bad dist {}", dist));
             }
-            let start = out.len() - dist;
-            for j in 0..ml {
-                let val = out[start + j];
-                out.push(val);
+            if dist >= ml {
+                let start = out.len() - dist;
+                out.extend_from_within(start..start + ml);
+            } else {
+                let start = out.len() - dist;
+                for j in 0..ml {
+                    let val = out[start + j];
+                    out.push(val);
+                }
             }
         }
     }
@@ -1115,17 +1144,16 @@ fn decode_block_into(slot: &mut [u8], comp: &[u8], orig: usize, flag: u8) -> Res
 fn byte_shuffle(data: &[u8], stride: usize) -> Vec<u8> {
     let n = data.len();
     let groups = n / stride;
-    let mut out = Vec::with_capacity(n);
-
-    // For each lane, collect all bytes at that position
+    let mut out = vec![0u8; n];
     for s in 0..stride {
-        for g in 0..groups {
-            out.push(data[g * stride + s]);
+        let lane = &mut out[s * groups..(s + 1) * groups];
+        for (g, dst) in lane.iter_mut().enumerate() {
+            *dst = data[g * stride + s];
         }
     }
     // Remainder bytes
-    for i in groups * stride..n {
-        out.push(data[i]);
+    if n > groups * stride {
+        out[groups * stride..n].copy_from_slice(&data[groups * stride..n]);
     }
     out
 }
@@ -1133,18 +1161,17 @@ fn byte_shuffle(data: &[u8], stride: usize) -> Vec<u8> {
 fn byte_unshuffle(data: &[u8], stride: usize) -> Vec<u8> {
     let n = data.len();
     let groups = n / stride;
-    let remainder = n % stride;
     let mut out = vec![0u8; n];
-
     for s in 0..stride {
-        for g in 0..groups {
-            out[g * stride + s] = data[s * groups + g];
+        let lane = &data[s * groups..(s + 1) * groups];
+        for (g, &src) in lane.iter().enumerate() {
+            out[g * stride + s] = src;
         }
     }
     // Remainder bytes
     let base = groups * stride;
-    for i in 0..remainder {
-        out[base + i] = data[base + i];
+    if n > base {
+        out[base..n].copy_from_slice(&data[base..n]);
     }
     out
 }
@@ -1319,5 +1346,12 @@ mod tests {
             assert_eq!(CompressMethod::from_u8(m.to_u8()), Some(m));
         }
         assert_eq!(CompressMethod::from_u8(200), None);
+    }
+
+    #[test]
+    fn roundtrip_f32_weights() {
+        let weights: Vec<f32> = (0..10_000).map(|i| (i as f32) * 0.001).collect();
+        let bytes = unsafe { std::slice::from_raw_parts(weights.as_ptr() as *const u8, weights.len() * 4) };
+        roundtrip(bytes);
     }
 }
