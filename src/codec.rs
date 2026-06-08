@@ -4,6 +4,8 @@
 #![allow(dead_code)]
 #![allow(unused_assignments)]
 
+use std::io::{self, Read, Seek, SeekFrom};
+
 
 // Distance code table (deflate-style, inspired by FCD factorization)
 // code → (base_distance, extra_bits_count)
@@ -1784,6 +1786,309 @@ pub fn method_name(m: CompressMethod) -> &'static str {
         CompressMethod::ShuffleBlk => "shuf+blk",
         CompressMethod::Shuffle2 => "shuf2+defl",
         CompressMethod::Shuffle2Blk => "shuf2+blk",
+    }
+}
+
+pub enum DecompressState {
+    Uninitialized,
+    Raw {
+        remaining: u64,
+    },
+    Buffered {
+        data: Vec<u8>,
+        pos: usize,
+    },
+    Blocked {
+        num_blocks: usize,
+        current_block: usize,
+        block_offsets: Vec<u64>,
+        block_headers: Vec<(usize, usize, u8)>, // (comp_size, orig_size, flag)
+        buffer: Vec<u8>,
+        buf_pos: usize,
+        comp_buf: Vec<u8>,
+    },
+    ShuffleBlocked {
+        stride: usize,
+        groups: usize,
+        prev_byte: [u8; 4],
+        active_blocks: Vec<Option<(usize, Vec<u8>)>>, // (block_index, block_data)
+        block_offsets: Vec<u64>,
+        block_headers: Vec<(usize, usize, u8)>,
+        comp_buf: Vec<u8>,
+        current_idx: usize,
+    },
+}
+
+pub struct DecompressReader<R: Read + Seek> {
+    inner: R,
+    method: CompressMethod,
+    stored_size: u64,
+    orig_size: u64,
+    stored_raw: bool,
+    state: DecompressState,
+}
+
+impl<R: Read + Seek> DecompressReader<R> {
+    pub fn new(
+        inner: R,
+        method: CompressMethod,
+        stored_size: u64,
+        orig_size: u64,
+        stored_raw: bool,
+    ) -> Self {
+        Self {
+            inner,
+            method,
+            stored_size,
+            orig_size,
+            stored_raw,
+            state: DecompressState::Uninitialized,
+        }
+    }
+
+    fn ensure_initialized(&mut self) -> io::Result<()> {
+        if !matches!(self.state, DecompressState::Uninitialized) {
+            return Ok(());
+        }
+
+        if self.stored_raw {
+            self.state = DecompressState::Raw {
+                remaining: self.stored_size,
+            };
+            return Ok(());
+        }
+
+        match self.method {
+            CompressMethod::Plain | CompressMethod::Shuffle | CompressMethod::Shuffle2 => {
+                let mut payload = vec![0u8; self.stored_size as usize];
+                self.inner.read_exact(&mut payload)?;
+
+                let decoded = smart_decompress(&payload, self.method, self.orig_size as usize)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+                self.state = DecompressState::Buffered {
+                    data: decoded,
+                    pos: 0,
+                };
+            }
+            CompressMethod::Blocked => {
+                let mut num_blocks_bytes = [0u8; 4];
+                self.inner.read_exact(&mut num_blocks_bytes)?;
+                let num_blocks = u32::from_le_bytes(num_blocks_bytes) as usize;
+
+                let mut block_offsets = Vec::with_capacity(num_blocks);
+                let mut block_headers = Vec::with_capacity(num_blocks);
+
+                let start_pos = self.inner.stream_position()?;
+                let mut curr_pos = start_pos;
+
+                let mut header_buf = [0u8; 9];
+                for _ in 0..num_blocks {
+                    block_offsets.push(curr_pos);
+                    self.inner.read_exact(&mut header_buf)?;
+                    let comp_size = u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]]) as usize;
+                    let orig_size = u32::from_le_bytes([header_buf[4], header_buf[5], header_buf[6], header_buf[7]]) as usize;
+                    let flag = header_buf[8];
+
+                    block_headers.push((comp_size, orig_size, flag));
+                    self.inner.seek(SeekFrom::Current(comp_size as i64))?;
+                    curr_pos += 9 + comp_size as u64;
+                }
+
+                self.state = DecompressState::Blocked {
+                    num_blocks,
+                    current_block: 0,
+                    block_offsets,
+                    block_headers,
+                    buffer: Vec::new(),
+                    buf_pos: 0,
+                    comp_buf: Vec::new(),
+                };
+            }
+            CompressMethod::ShuffleBlk | CompressMethod::Shuffle2Blk => {
+                let mut num_blocks_bytes = [0u8; 4];
+                self.inner.read_exact(&mut num_blocks_bytes)?;
+                let num_blocks = u32::from_le_bytes(num_blocks_bytes) as usize;
+
+                let mut block_offsets = Vec::with_capacity(num_blocks);
+                let mut block_headers = Vec::with_capacity(num_blocks);
+
+                let start_pos = self.inner.stream_position()?;
+                let mut curr_pos = start_pos;
+
+                let mut header_buf = [0u8; 9];
+                for _ in 0..num_blocks {
+                    block_offsets.push(curr_pos);
+                    self.inner.read_exact(&mut header_buf)?;
+                    let comp_size = u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]]) as usize;
+                    let orig_size = u32::from_le_bytes([header_buf[4], header_buf[5], header_buf[6], header_buf[7]]) as usize;
+                    let flag = header_buf[8];
+
+                    block_headers.push((comp_size, orig_size, flag));
+                    self.inner.seek(SeekFrom::Current(comp_size as i64))?;
+                    curr_pos += 9 + comp_size as u64;
+                }
+
+                let stride = if self.method == CompressMethod::ShuffleBlk { 4 } else { 2 };
+                let groups = (self.orig_size as usize) / stride;
+
+                self.state = DecompressState::ShuffleBlocked {
+                    stride,
+                    groups,
+                    prev_byte: [0u8; 4],
+                    active_blocks: vec![None; stride],
+                    block_offsets,
+                    block_headers,
+                    comp_buf: Vec::new(),
+                    current_idx: 0,
+                };
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl<R: Read + Seek> Read for DecompressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.ensure_initialized()?;
+
+        match &mut self.state {
+            DecompressState::Uninitialized => unreachable!(),
+            DecompressState::Raw { remaining } => {
+                if *remaining == 0 {
+                    return Ok(0);
+                }
+                let to_read = std::cmp::min(*remaining, buf.len() as u64) as usize;
+                let n = self.inner.read(&mut buf[..to_read])?;
+                *remaining -= n as u64;
+                Ok(n)
+            }
+            DecompressState::Buffered { data, pos } => {
+                if *pos >= data.len() {
+                    return Ok(0);
+                }
+                let to_copy = std::cmp::min(data.len() - *pos, buf.len());
+                buf[..to_copy].copy_from_slice(&data[*pos..*pos + to_copy]);
+                *pos += to_copy;
+                Ok(to_copy)
+            }
+            DecompressState::Blocked {
+                num_blocks,
+                current_block,
+                block_offsets,
+                block_headers,
+                buffer,
+                buf_pos,
+                comp_buf,
+            } => {
+                if *buf_pos >= buffer.len() {
+                    if *current_block >= *num_blocks {
+                        return Ok(0);
+                    }
+                    let (comp_size, orig_size, flag) = block_headers[*current_block];
+                    let offset = block_offsets[*current_block];
+                    
+                    self.inner.seek(SeekFrom::Start(offset + 9))?;
+                    if comp_buf.len() < comp_size {
+                        comp_buf.resize(comp_size, 0);
+                    }
+                    self.inner.read_exact(&mut comp_buf[..comp_size])?;
+
+                    let decoded_block = if flag == 1 {
+                        deflate_style_decode(&comp_buf[..comp_size], orig_size)
+                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                    } else {
+                        comp_buf[..comp_size].to_vec()
+                    };
+
+                    *buffer = decoded_block;
+                    *buf_pos = 0;
+                    *current_block += 1;
+                }
+
+                let to_copy = std::cmp::min(buffer.len() - *buf_pos, buf.len());
+                buf[..to_copy].copy_from_slice(&buffer[*buf_pos..*buf_pos + to_copy]);
+                *buf_pos += to_copy;
+                Ok(to_copy)
+            }
+            DecompressState::ShuffleBlocked {
+                stride,
+                groups,
+                prev_byte,
+                active_blocks,
+                block_offsets,
+                block_headers,
+                comp_buf,
+                current_idx,
+            } => {
+                let orig_size_usize = self.orig_size as usize;
+                if *current_idx >= orig_size_usize {
+                    return Ok(0);
+                }
+
+                let mut written = 0;
+                while written < buf.len() && *current_idx < orig_size_usize {
+                    let source_idx = if *current_idx < *stride * *groups {
+                        let g = *current_idx / *stride;
+                        let s = *current_idx % *stride;
+                        s * *groups + g
+                    } else {
+                        *current_idx
+                    };
+
+                    let b_idx = source_idx / BLOCK_SIZE;
+                    let offset_in_block = source_idx % BLOCK_SIZE;
+
+                    let s_cache = if *current_idx < *stride * *groups {
+                        *current_idx % *stride
+                    } else {
+                        0
+                    };
+
+                    let cached_valid = match &active_blocks[s_cache] {
+                        Some((cached_b, _)) => *cached_b == b_idx,
+                        None => false,
+                    };
+
+                    if !cached_valid {
+                        let (comp_size, orig_size, flag) = block_headers[b_idx];
+                        let offset = block_offsets[b_idx];
+                        
+                        self.inner.seek(SeekFrom::Start(offset + 9))?;
+                        if comp_buf.len() < comp_size {
+                            comp_buf.resize(comp_size, 0);
+                        }
+                        self.inner.read_exact(&mut comp_buf[..comp_size])?;
+
+                        let decoded_block = if flag == 1 {
+                            deflate_style_decode(&comp_buf[..comp_size], orig_size)
+                                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                        } else {
+                            comp_buf[..comp_size].to_vec()
+                        };
+
+                        active_blocks[s_cache] = Some((b_idx, decoded_block));
+                    }
+
+                    let block_data = &active_blocks[s_cache].as_ref().unwrap().1;
+                    let val = if *current_idx < *stride * *groups {
+                        let byte = block_data[offset_in_block];
+                        let val = byte.wrapping_add(prev_byte[s_cache]);
+                        prev_byte[s_cache] = val;
+                        val
+                    } else {
+                        block_data[offset_in_block]
+                    };
+
+                    buf[written] = val;
+                    written += 1;
+                    *current_idx += 1;
+                }
+
+                Ok(written)
+            }
+        }
     }
 }
 
