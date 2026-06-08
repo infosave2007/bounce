@@ -92,6 +92,27 @@ pub fn crc32(data: &[u8]) -> u32 {
     crc ^ 0xFFFF_FFFF
 }
 
+pub fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
+    let t = crc32_tables();
+    crc ^= 0xFFFF_FFFF;
+    let mut chunks = data.chunks_exact(8);
+    for c in &mut chunks {
+        crc ^= u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+        crc = t[7][(crc & 0xFF) as usize]
+            ^ t[6][((crc >> 8) & 0xFF) as usize]
+            ^ t[5][((crc >> 16) & 0xFF) as usize]
+            ^ t[4][((crc >> 24) & 0xFF) as usize]
+            ^ t[3][c[4] as usize]
+            ^ t[2][c[5] as usize]
+            ^ t[1][c[6] as usize]
+            ^ t[0][c[7] as usize];
+    }
+    for &b in chunks.remainder() {
+        crc = t[0][((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    crc ^ 0xFFFF_FFFF
+}
+
 // ── Entry metadata ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -219,7 +240,7 @@ pub fn create(
     }
 
     let out_file = fs::File::create(archive_path)?;
-    let mut w = BufWriter::new(out_file);
+    let mut w = BufWriter::with_capacity(2 * 1024 * 1024, out_file);
 
     w.write_all(MAGIC)?;
     w.write_all(&[FORMAT_VERSION])?;
@@ -233,48 +254,233 @@ pub fn create(
 
     for f in &files {
         let meta = fs::metadata(&f.abs)?;
-        let data = fs::read(&f.abs)?;
-        let crc = crc32(&data);
+        let file_size = meta.len();
         let mode = file_mode(&meta);
         let mtime = file_mtime(&meta);
 
-        // Compress; fall back to raw storage when it does not help.
-        let (payload, method, stored_raw): (Vec<u8>, u8, bool) =
-            match codec::smart_compress(&data) {
-                Some((c, m)) if c.len() < data.len() => (c, m.to_u8(), false),
-                _ => (data.clone(), codec::CompressMethod::Plain.to_u8(), true),
+        let (_orig_len, _stored_len) = if file_size < 512 * 1024 * 1024 {
+            let data = fs::read(&f.abs)?;
+            let crc = crc32(&data);
+            let (payload, method, stored_raw): (Vec<u8>, u8, bool) =
+                match codec::smart_compress(&data) {
+                    Some((c, m)) if c.len() < data.len() => (c, m.to_u8(), false),
+                    _ => (data.clone(), codec::CompressMethod::Plain.to_u8(), true),
+                };
+
+            let path_bytes = f.rel.as_bytes();
+            w.write_all(&(path_bytes.len() as u16).to_le_bytes())?;
+            w.write_all(path_bytes)?;
+            w.write_all(&mode.to_le_bytes())?;
+            w.write_all(&mtime.to_le_bytes())?;
+            w.write_all(&(data.len() as u64).to_le_bytes())?;
+            w.write_all(&(payload.len() as u64).to_le_bytes())?;
+            w.write_all(&[method])?;
+            w.write_all(&[stored_raw as u8])?;
+            w.write_all(&crc.to_le_bytes())?;
+            w.write_all(&payload)?;
+
+            stats.orig_total += data.len() as u64;
+            stats.stored_total += payload.len() as u64;
+
+            if verbose {
+                let pct = if data.is_empty() {
+                    0.0
+                } else {
+                    payload.len() as f64 / data.len() as f64 * 100.0
+                };
+                eprintln!(
+                    "  adding: {}  ({} -> {} bytes, {:.1}%)",
+                    f.rel,
+                    data.len(),
+                    payload.len(),
+                    pct
+                );
+            }
+            (data.len() as u64, payload.len() as u64)
+        } else {
+            let header_offset = w.stream_position()?;
+            let path_bytes = f.rel.as_bytes();
+            w.write_all(&(path_bytes.len() as u16).to_le_bytes())?;
+            w.write_all(path_bytes)?;
+            w.write_all(&mode.to_le_bytes())?;
+            w.write_all(&mtime.to_le_bytes())?;
+            w.write_all(&0u64.to_le_bytes())?; // orig_size placeholder
+            w.write_all(&0u64.to_le_bytes())?; // stored_size placeholder
+            w.write_all(&[0u8])?;              // method placeholder
+            w.write_all(&[0u8])?;              // stored_raw placeholder
+            w.write_all(&0u32.to_le_bytes())?; // crc placeholder
+
+            let payload_start = w.stream_position()?;
+            w.write_all(&0u32.to_le_bytes())?; // num_blocks placeholder
+
+            let mut file = fs::File::open(&f.abs)?;
+
+            // Read 1MB sample from the middle of the file to bypass metadata headers and determine the best method
+            let sample_offset = file_size / 2;
+            let sample_size = std::cmp::min(file_size - sample_offset, 1 * 1024 * 1024) as usize;
+            let mut sample = vec![0u8; sample_size];
+            file.seek(SeekFrom::Start(sample_offset))?;
+            file.read_exact(&mut sample)?;
+            file.seek(SeekFrom::Start(0))?;
+
+            let method = match codec::smart_compress(&sample) {
+                Some((_, codec::CompressMethod::Shuffle)) | Some((_, codec::CompressMethod::ShuffleBlk)) => {
+                    codec::CompressMethod::ShuffleBlk
+                }
+                Some((_, codec::CompressMethod::Shuffle2)) | Some((_, codec::CompressMethod::Shuffle2Blk)) => {
+                    codec::CompressMethod::Shuffle2Blk
+                }
+                _ => codec::CompressMethod::Blocked,
             };
 
-        let path_bytes = f.rel.as_bytes();
-        w.write_all(&(path_bytes.len() as u16).to_le_bytes())?;
-        w.write_all(path_bytes)?;
-        w.write_all(&mode.to_le_bytes())?;
-        w.write_all(&mtime.to_le_bytes())?;
-        w.write_all(&(data.len() as u64).to_le_bytes())?;
-        w.write_all(&(payload.len() as u64).to_le_bytes())?;
-        w.write_all(&[method])?;
-        w.write_all(&[stored_raw as u8])?;
-        w.write_all(&crc.to_le_bytes())?;
-        w.write_all(&payload)?;
+            let mut num_blocks = 0u32;
+            let mut crc = 0u32;
+            let mut orig_size = 0u64;
+
+            if method == codec::CompressMethod::Blocked {
+                let mut reader = BufReader::with_capacity(2 * 1024 * 1024, file);
+                let mut buffer = vec![0u8; codec::BLOCK_SIZE];
+                let mut head = vec![-1i32; codec::LZV2_HASH_SIZE];
+                let mut prev = vec![0i32; codec::LZV2_WINDOW_SIZE];
+
+                loop {
+                    let mut block_len = 0;
+                    while block_len < codec::BLOCK_SIZE {
+                        match reader.read(&mut buffer[block_len..]) {
+                            Ok(0) => break,
+                            Ok(n) => block_len += n,
+                            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    if block_len == 0 {
+                        break;
+                    }
+
+                    let block = &buffer[..block_len];
+                    crc = crc32_update(crc, block);
+                    orig_size += block_len as u64;
+
+                    head.fill(-1);
+                    let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev);
+                    let res = codec::encode_block_result(block, c_opt);
+                    w.write_all(&res)?;
+                    num_blocks += 1;
+                }
+            } else {
+                // Compute CRC32 sequentially in 64KB chunks
+                let mut crc_buf = vec![0u8; 64 * 1024];
+                loop {
+                    match file.read(&mut crc_buf) {
+                        Ok(0) => break,
+                        Ok(n) => crc = crc32_update(crc, &crc_buf[..n]),
+                        Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                file.seek(SeekFrom::Start(0))?;
+
+                let mut buffer = vec![0u8; codec::BLOCK_SIZE];
+                let mut head = vec![-1i32; codec::LZV2_HASH_SIZE];
+                let mut prev = vec![0i32; codec::LZV2_WINDOW_SIZE];
+
+                let stride = if method == codec::CompressMethod::ShuffleBlk { 4 } else { 2 };
+                let groups = (file_size as usize) / stride;
+                let mut prev_byte = [0u8; 4];
+                let mut span_buf = Vec::new();
+
+                let num_blocks_expected = ((file_size + codec::BLOCK_SIZE as u64 - 1) / codec::BLOCK_SIZE as u64) as u32;
+
+                for b_idx_exp in 0..num_blocks_expected {
+                    let start_byte = b_idx_exp as usize * codec::BLOCK_SIZE;
+                    let end_byte = std::cmp::min((b_idx_exp as usize + 1) * codec::BLOCK_SIZE, file_size as usize);
+                    let block_len = end_byte - start_byte;
+
+                    let mut curr_i = start_byte;
+                    let mut buf_idx = 0;
+
+                    while curr_i < end_byte {
+                        if curr_i >= stride * groups {
+                            let rem_len = end_byte - curr_i;
+                            file.seek(SeekFrom::Start(curr_i as u64))?;
+                            file.read_exact(&mut buffer[buf_idx..buf_idx + rem_len])?;
+                            buf_idx += rem_len;
+                            curr_i += rem_len;
+                        } else {
+                            let s = curr_i / groups;
+                            let lane_end_i = std::cmp::min((s + 1) * groups, end_byte);
+                            let chunk_len = lane_end_i - curr_i;
+
+                            let g_start = curr_i % groups;
+                            let orig_start_offset = g_start * stride + s;
+                            let orig_span_len = (chunk_len - 1) * stride + 1;
+
+                            if span_buf.len() < orig_span_len {
+                                span_buf.resize(orig_span_len, 0);
+                            }
+                            file.seek(SeekFrom::Start(orig_start_offset as u64))?;
+                            file.read_exact(&mut span_buf[..orig_span_len])?;
+
+                            for j in 0..chunk_len {
+                                let val = span_buf[j * stride];
+                                let delta = val.wrapping_sub(prev_byte[s]);
+                                buffer[buf_idx] = delta;
+                                prev_byte[s] = val;
+                                buf_idx += 1;
+                            }
+                            curr_i = lane_end_i;
+                        }
+                    }
+
+                    let block = &buffer[..block_len];
+                    orig_size += block_len as u64;
+
+                    head.fill(-1);
+                    let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev);
+                    let res = codec::encode_block_result(block, c_opt);
+                    w.write_all(&res)?;
+                    num_blocks += 1;
+                }
+            }
+
+            let payload_end = w.stream_position()?;
+            let stored_size = payload_end - payload_start;
+
+            // Rewrite num_blocks
+            w.seek(SeekFrom::Start(payload_start))?;
+            w.write_all(&num_blocks.to_le_bytes())?;
+
+            // Rewrite header values
+            w.seek(SeekFrom::Start(header_offset + 14 + path_bytes.len() as u64))?;
+            w.write_all(&orig_size.to_le_bytes())?;
+            w.write_all(&stored_size.to_le_bytes())?;
+            w.write_all(&[method.to_u8()])?;
+            w.write_all(&[0u8])?; // stored_raw = false
+            w.write_all(&crc.to_le_bytes())?;
+
+            w.seek(SeekFrom::Start(payload_end))?;
+
+            stats.orig_total += orig_size;
+            stats.stored_total += stored_size;
+
+            if verbose {
+                let pct = if orig_size == 0 {
+                    0.0
+                } else {
+                    stored_size as f64 / orig_size as f64 * 100.0
+                };
+                eprintln!(
+                    "  adding: {}  ({} -> {} bytes, {:.1}%)",
+                    f.rel,
+                    orig_size,
+                    stored_size,
+                    pct
+                );
+            }
+            (orig_size, stored_size)
+        };
 
         stats.files += 1;
-        stats.orig_total += data.len() as u64;
-        stats.stored_total += payload.len() as u64;
-
-        if verbose {
-            let pct = if data.is_empty() {
-                0.0
-            } else {
-                payload.len() as f64 / data.len() as f64 * 100.0
-            };
-            eprintln!(
-                "  adding: {}  ({} -> {} bytes, {:.1}%)",
-                f.rel,
-                data.len(),
-                payload.len(),
-                pct
-            );
-        }
     }
 
     w.flush()?;
@@ -319,7 +525,7 @@ fn read_i64<R: Read>(r: &mut R) -> io::Result<i64> {
 
 fn open_archive(archive_path: &str) -> io::Result<(BufReader<fs::File>, u32)> {
     let file = fs::File::open(archive_path)?;
-    let mut r = BufReader::new(file);
+    let mut r = BufReader::with_capacity(2 * 1024 * 1024, file);
 
     let mut magic = [0u8; 4];
     if !read_exact_or_eof(&mut r, &mut magic)? || &magic != MAGIC {
@@ -392,27 +598,258 @@ fn decode_payload(meta: &EntryMeta, payload: &[u8]) -> io::Result<Vec<u8>> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+fn load_compressed_block<R: Read + Seek>(
+    r: &mut R,
+    block_index: usize,
+    block_headers: &[(usize, usize, u8)],
+    block_offsets: &[u64],
+    comp_buf: &mut Vec<u8>,
+) -> io::Result<Vec<u8>> {
+    let (comp_size, orig_size, flag) = block_headers[block_index];
+    let offset = block_offsets[block_index];
+    r.seek(SeekFrom::Start(offset + 9))?;
+    if comp_buf.len() < comp_size {
+        comp_buf.resize(comp_size, 0);
+    }
+    r.read_exact(&mut comp_buf[..comp_size])?;
+    if flag == 1 {
+        codec::deflate_style_decode(&comp_buf[..comp_size], orig_size)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    } else {
+        Ok(comp_buf[..comp_size].to_vec())
+    }
+}
+
+
+fn extract_shuffled_blocked<R: Read + Seek, W: Write>(
+    r: &mut R,
+    meta: &EntryMeta,
+    w: &mut W,
+    method: codec::CompressMethod,
+) -> io::Result<u32> {
+    let mut crc = 0u32;
+    let num_blocks = read_u32(r)? as usize;
+    let mut block_offsets = Vec::with_capacity(num_blocks);
+    let mut block_headers = Vec::with_capacity(num_blocks);
+
+    let start_pos = r.stream_position()?;
+    let mut curr_pos = start_pos;
+
+    let mut header_buf = [0u8; 9];
+    for _ in 0..num_blocks {
+        block_offsets.push(curr_pos);
+        r.read_exact(&mut header_buf)?;
+        let comp_size = u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]]) as usize;
+        let orig_size = u32::from_le_bytes([header_buf[4], header_buf[5], header_buf[6], header_buf[7]]) as usize;
+        let flag = header_buf[8];
+        block_headers.push((comp_size, orig_size, flag));
+
+        r.seek(SeekFrom::Current(comp_size as i64))?;
+        curr_pos += 9 + comp_size as u64;
+    }
+
+    let stride = if method == codec::CompressMethod::ShuffleBlk { 4 } else { 2 };
+    let groups = (meta.orig_size as usize) / stride;
+    let mut prev_byte = [0u8; 4];
+    let mut active_blocks = vec![None; stride];
+    let mut comp_buf = Vec::new();
+
+    let mut out_buf = vec![0u8; codec::BLOCK_SIZE];
+    let mut out_idx = 0;
+
+    for g in 0..groups {
+        for s in 0..stride {
+            let idx = s * groups + g;
+            let b_idx = idx / codec::BLOCK_SIZE;
+            let offset_in_block = idx % codec::BLOCK_SIZE;
+
+            let cached_valid = match &active_blocks[s] {
+                Some((cached_b, _)) => *cached_b == b_idx,
+                None => false,
+            };
+
+            if !cached_valid {
+                let data = load_compressed_block(r, b_idx, &block_headers, &block_offsets, &mut comp_buf)?;
+                active_blocks[s] = Some((b_idx, data));
+            }
+
+            let block_data = &active_blocks[s].as_ref().unwrap().1;
+            let byte = block_data[offset_in_block];
+            let val = byte.wrapping_add(prev_byte[s]);
+            prev_byte[s] = val;
+
+            out_buf[out_idx] = val;
+            out_idx += 1;
+            if out_idx == codec::BLOCK_SIZE {
+                crc = crc32_update(crc, &out_buf);
+                w.write_all(&out_buf)?;
+                out_idx = 0;
+            }
+        }
+    }
+
+    for idx in (stride * groups)..(meta.orig_size as usize) {
+        let b_idx = idx / codec::BLOCK_SIZE;
+        let offset_in_block = idx % codec::BLOCK_SIZE;
+
+        let cached_valid = match &active_blocks[0] {
+            Some((cached_b, _)) => *cached_b == b_idx,
+            None => false,
+        };
+
+        if !cached_valid {
+            let data = load_compressed_block(r, b_idx, &block_headers, &block_offsets, &mut comp_buf)?;
+            active_blocks[0] = Some((b_idx, data));
+        }
+
+        let block_data = &active_blocks[0].as_ref().unwrap().1;
+        let val = block_data[offset_in_block];
+
+        out_buf[out_idx] = val;
+        out_idx += 1;
+        if out_idx == codec::BLOCK_SIZE {
+            crc = crc32_update(crc, &out_buf);
+            w.write_all(&out_buf)?;
+            out_idx = 0;
+        }
+    }
+
+    if out_idx > 0 {
+        crc = crc32_update(crc, &out_buf[..out_idx]);
+        w.write_all(&out_buf[..out_idx])?;
+    }
+
+    // Seek the reader to position after the entry's payload
+    r.seek(SeekFrom::Start(start_pos - 4 + meta.stored_size))?;
+    Ok(crc)
+}
+
+fn extract_entry_payload<R: Read + Seek, W: Write>(
+    r: &mut R,
+    meta: &EntryMeta,
+    w: &mut W,
+) -> io::Result<u32> {
+    let mut crc = 0u32;
+
+    if meta.stored_raw {
+        let mut remaining = meta.stored_size;
+        let mut buffer = vec![0u8; 64 * 1024];
+        while remaining > 0 {
+            let to_read = std::cmp::min(remaining, buffer.len() as u64) as usize;
+            r.read_exact(&mut buffer[..to_read])?;
+            let chunk = &buffer[..to_read];
+            crc = crc32_update(crc, chunk);
+            w.write_all(chunk)?;
+            remaining -= to_read as u64;
+        }
+        return Ok(crc);
+    }
+
+    if meta.stored_size < 512 * 1024 * 1024 {
+        // High-speed path: read compressed payload into RAM and decompress in parallel using multiple CPU cores
+        let mut payload = vec![0u8; meta.stored_size as usize];
+        r.read_exact(&mut payload)?;
+        let data = decode_payload(meta, &payload)?;
+        crc = crc32(&data);
+        w.write_all(&data)?;
+        return Ok(crc);
+    }
+
+    // Streaming path (OOM protection for >= 512MB files)
+    let method = codec::CompressMethod::from_u8(meta.method).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unknown codec method {}", meta.method),
+        )
+    })?;
+
+    match method {
+        codec::CompressMethod::Blocked => {
+            let num_blocks = read_u32(r)? as usize;
+            let mut comp_buf = Vec::new();
+
+            let mut header = [0u8; 9];
+            for _ in 0..num_blocks {
+                r.read_exact(&mut header)?;
+                let comp_size = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+                let orig_size = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+                let flag = header[8];
+
+                if comp_buf.len() < comp_size {
+                    comp_buf.resize(comp_size, 0);
+                }
+                r.read_exact(&mut comp_buf[..comp_size])?;
+
+                if flag == 1 {
+                    let decomp_vec = codec::deflate_style_decode(&comp_buf[..comp_size], orig_size)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                    crc = crc32_update(crc, &decomp_vec);
+                    w.write_all(&decomp_vec)?;
+                } else {
+                    let decomp = &comp_buf[..comp_size];
+                    crc = crc32_update(crc, decomp);
+                    w.write_all(decomp)?;
+                }
+            }
+        }
+        codec::CompressMethod::ShuffleBlk | codec::CompressMethod::Shuffle2Blk => {
+            crc = extract_shuffled_blocked(r, meta, w, method)?;
+        }
+        _ => {
+            let mut payload = vec![0u8; meta.stored_size as usize];
+            r.read_exact(&mut payload)?;
+            let data = decode_payload(meta, &payload)?;
+            crc = crc32(&data);
+            w.write_all(&data)?;
+        }
+    }
+
+    Ok(crc)
+}
+
+struct CountingWriter<W> {
+    inner: W,
+    count: u64,
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.count += n as u64;
+        Ok(n)
+    }
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        self.inner.write_all(buf)?;
+        self.count += buf.len() as u64;
+        Ok(())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// Verify CRC of every member. Returns the number of files checked.
 pub fn test(archive_path: &str, verbose: bool) -> io::Result<usize> {
     let (mut r, count) = open_archive(archive_path)?;
     for _ in 0..count {
         let meta = read_entry_header(&mut r)?;
-        let mut payload = vec![0u8; meta.stored_size as usize];
-        r.read_exact(&mut payload)?;
-        let data = decode_payload(&meta, &payload)?;
-        if data.len() as u64 != meta.orig_size {
+        let mut sink = CountingWriter {
+            inner: io::sink(),
+            count: 0,
+        };
+        let actual_crc = extract_entry_payload(&mut r, &meta, &mut sink)?;
+        if sink.count != meta.orig_size {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "{}: size mismatch ({} != {})",
                     meta.path,
-                    data.len(),
+                    sink.count,
                     meta.orig_size
                 ),
             ));
         }
-        let actual = crc32(&data);
-        if actual != meta.crc {
+        if actual_crc != meta.crc {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("{}: CRC mismatch (corrupt)", meta.path),
@@ -480,18 +917,6 @@ pub fn extract(
             continue;
         }
 
-        let mut payload = vec![0u8; meta.stored_size as usize];
-        r.read_exact(&mut payload)?;
-        let data = decode_payload(&meta, &payload)?;
-
-        let actual = crc32(&data);
-        if actual != meta.crc {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{}: CRC mismatch (corrupt), aborting", meta.path),
-            ));
-        }
-
         let out_path = safe_join(dest, &meta.path)?;
         if out_path.exists() && !force {
             return Err(io::Error::new(
@@ -502,7 +927,30 @@ pub fn extract(
         if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&out_path, &data)?;
+
+        let out_file = fs::File::create(&out_path)?;
+        let mut w = CountingWriter {
+            inner: BufWriter::with_capacity(2 * 1024 * 1024, out_file),
+            count: 0,
+        };
+
+        let actual_crc = extract_entry_payload(&mut r, &meta, &mut w)?;
+        w.flush()?;
+
+        if w.count != meta.orig_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: size mismatch ({} != {})", meta.path, w.count, meta.orig_size),
+            ));
+        }
+
+        if actual_crc != meta.crc {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: CRC mismatch (corrupt), aborting", meta.path),
+            ));
+        }
+
         restore_mode(&out_path, meta.mode);
 
         extracted += 1;
@@ -534,18 +982,27 @@ pub fn extract_to_writer<W: Write>(
             continue;
         }
 
-        let mut payload = vec![0u8; meta.stored_size as usize];
-        r.read_exact(&mut payload)?;
-        let data = decode_payload(&meta, &payload)?;
+        let mut w = CountingWriter {
+            inner: &mut *out,
+            count: 0,
+        };
 
-        if crc32(&data) != meta.crc {
+        let actual_crc = extract_entry_payload(&mut r, &meta, &mut w)?;
+
+        if w.count != meta.orig_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: size mismatch ({} != {})", meta.path, w.count, meta.orig_size),
+            ));
+        }
+
+        if actual_crc != meta.crc {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("{}: CRC mismatch (corrupt), aborting", meta.path),
             ));
         }
 
-        out.write_all(&data)?;
         extracted += 1;
     }
 

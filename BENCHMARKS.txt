@@ -6,7 +6,7 @@
 ### Safetensors Model Weights — 450.05 MB (471913120 bytes)
   tool                       size     ratio      compress    decompress
   ---------------------------------------------------------------------------
-  bounce                   343255057 B    72.7%  C:   124.4 MB/s  D:   672.4 MB/s
+  bounce                   343255057 B    72.7%  C:   111.5 MB/s  D:   647.3 MB/s
   gzip -9                  374391731 B    79.3%  C:    18.1 MB/s  D:   352.9 MB/s
   lz4 -9                   468560164 B    99.3%  C:   189.5 MB/s  D:  2044.8 MB/s
   zstd -19                 359412232 B    76.2%  C:    12.4 MB/s  D:   383.5 MB/s
@@ -15,7 +15,7 @@
 ### Text (markdown corpus) — 1.32 MB (1380984 bytes)
   tool                       size     ratio      compress    decompress
   ---------------------------------------------------------------------------
-  bounce                   461930 B    33.4%  C:     3.7 MB/s  D:    37.1 MB/s
+  bounce                   461930 B    33.4%  C:    26.9 MB/s  D:    33.5 MB/s
   gzip -9                  404664 B    29.3%  C:    15.5 MB/s  D:    36.0 MB/s
   lz4 -9                   456579 B    33.1%  C:    20.4 MB/s  D:    36.7 MB/s
   zstd -19                  45772 B     3.3%  C:    18.9 MB/s  D:    35.8 MB/s
@@ -26,7 +26,7 @@
 ### Source code (Go + Rust) — 0.51 MB (529836 bytes)
   tool                       size     ratio      compress    decompress
   ---------------------------------------------------------------------------
-  bounce                    98652 B    18.6%  C:     8.1 MB/s  D:    14.5 MB/s
+  bounce                    98652 B    18.6%  C:     8.0 MB/s  D:    14.2 MB/s
   gzip -9                  101897 B    19.2%  C:    10.3 MB/s  D:    14.6 MB/s
   lz4 -9                   122076 B    23.0%  C:    12.1 MB/s  D:    14.7 MB/s
   zstd -19                  84994 B    16.0%  C:     4.7 MB/s  D:    14.6 MB/s
@@ -37,7 +37,7 @@
 ### LLM weights (gguf Q4_K_M) — 1024.00 MB (1073741824 bytes)
   tool                       size     ratio      compress    decompress
   ---------------------------------------------------------------------------
-  bounce               1065272889 B    99.2%  C:   163.1 MB/s  D:   834.2 MB/s
+  bounce               1065272889 B    99.2%  C:   136.9 MB/s  D:   207.4 MB/s
   gzip -9              1063316152 B    99.0%  C:    53.1 MB/s  D:   510.2 MB/s
   lz4 -9               1066181306 B    99.3%  C:   367.8 MB/s  D:  4102.7 MB/s
   zstd -19             1060561565 B    98.8%  C:    22.9 MB/s  D:  1258.9 MB/s

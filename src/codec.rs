@@ -878,9 +878,9 @@ fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-const LZV2_WINDOW_SIZE: usize = 65536;
+pub(crate) const LZV2_WINDOW_SIZE: usize = 65536;
 const LZV2_HASH_BITS: usize = 16;
-const LZV2_HASH_SIZE: usize = 1 << LZV2_HASH_BITS;
+pub(crate) const LZV2_HASH_SIZE: usize = 1 << LZV2_HASH_BITS;
 const LZV2_MIN_MATCH: usize = 3;
 const LZV2_MAX_MATCH: usize = 258;
 const LZV2_MAX_CHAIN: usize = 256;
@@ -928,7 +928,7 @@ fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
     deflate_style_encode_with_buffers(data, &mut head, &mut prev)
 }
 
-fn deflate_style_encode_with_buffers(
+pub(crate) fn deflate_style_encode_with_buffers(
     data: &[u8],
     head: &mut [i32],
     prev: &mut [i32],
@@ -1127,7 +1127,7 @@ fn deflate_style_encode_with_buffers(
     Some(out)
 }
 
-fn deflate_style_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
+pub(crate) fn deflate_style_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
     if data.len() < 20 {
         return Err("deflateStyle: too short".to_string());
     }
@@ -1250,7 +1250,7 @@ fn deflate_style_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, Str
 // Format: [4 numBlocks] { [4 compSize] [4 origSize] [blockData] }*
 // ══════════════════════════════════════════════════════════════
 
-const BLOCK_SIZE: usize = 32 * 1024; // 32KB blocks
+pub(crate) const BLOCK_SIZE: usize = 32 * 1024; // 32KB blocks
 
 // Number of worker threads to use for a given amount of work.
 fn num_threads(work: usize) -> usize {
@@ -1303,7 +1303,7 @@ where
     }
 }
 
-fn encode_block_result(block: &[u8], c_opt: Option<Vec<u8>>) -> Vec<u8> {
+pub(crate) fn encode_block_result(block: &[u8], c_opt: Option<Vec<u8>>) -> Vec<u8> {
     match c_opt {
         Some(c) if c.len() < block.len() => {
             let mut v = Vec::with_capacity(c.len() + 9);
