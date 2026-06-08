@@ -351,17 +351,31 @@ impl BitWriter {
     }
 
     #[inline(always)]
+    fn from_vec(out: Vec<u8>) -> Self {
+        Self {
+            out,
+            bit_buf: 0,
+            bit_pos: 0,
+        }
+    }
+
+    #[inline(always)]
     fn write(&mut self, val: u32, n: usize) {
         self.bit_buf = (self.bit_buf << n) | (val as u64 & ((1 << n) - 1));
         self.bit_pos += n;
-        while self.bit_pos >= 8 {
-            self.bit_pos -= 8;
-            self.out.push((self.bit_buf >> self.bit_pos) as u8);
+        if self.bit_pos >= 32 {
+            self.bit_pos -= 32;
+            let chunk = (self.bit_buf >> self.bit_pos) as u32;
+            self.out.extend_from_slice(&chunk.to_be_bytes());
         }
     }
 
     #[inline(always)]
     fn finish(mut self) -> Vec<u8> {
+        while self.bit_pos >= 8 {
+            self.bit_pos -= 8;
+            self.out.push((self.bit_buf >> self.bit_pos) as u8);
+        }
         if self.bit_pos > 0 {
             self.out.push((self.bit_buf << (8 - self.bit_pos)) as u8);
         }
@@ -548,23 +562,14 @@ fn huff_encode_uint16(data: &[u16], version: u8) -> Option<Vec<u8>> {
     }
     out.extend_from_slice(&rle_data);
 
-    let mut bit_buf = 0u64;
-    let mut bit_pos = 0usize;
+    let mut bw = BitWriter::from_vec(out);
     for &b in data {
         let cl = code_widths[b as usize] as usize;
-        let c = codes[b as usize] as u64;
-        bit_buf = (bit_buf << cl) | c;
-        bit_pos += cl;
-        while bit_pos >= 8 {
-            bit_pos -= 8;
-            out.push((bit_buf >> bit_pos) as u8);
-            bit_buf &= (1u64 << bit_pos) - 1;
-        }
+        let c = codes[b as usize];
+        bw.write(c, cl);
     }
 
-    if bit_pos > 0 {
-        out.push((bit_buf << (8 - bit_pos)) as u8);
-    }
+    let out = bw.finish();
 
     Some(out)
 }
@@ -821,23 +826,14 @@ fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
     out.push(rle_data.len() as u8);
     out.extend_from_slice(&rle_data);
 
-    let mut bit_buf = 0u64;
-    let mut bit_pos = 0usize;
+    let mut bw = BitWriter::from_vec(out);
     for &b in data {
         let cl = code_widths[b as usize] as usize;
-        let c = codes[b as usize] as u64;
-        bit_buf = (bit_buf << cl) | c;
-        bit_pos += cl;
-        while bit_pos >= 8 {
-            bit_pos -= 8;
-            out.push((bit_buf >> bit_pos) as u8);
-            bit_buf &= (1u64 << bit_pos) - 1;
-        }
+        let c = codes[b as usize];
+        bw.write(c, cl);
     }
 
-    if bit_pos > 0 {
-        out.push((bit_buf << (8 - bit_pos)) as u8);
-    }
+    let out = bw.finish();
 
     Some(out)
 }
@@ -1110,18 +1106,11 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
     let dist_codes = &mut buffers.dist_codes;
     let extra_bits = &mut buffers.extra_bits;
 
-    let mut extra_buf = 0u64;
-    let mut extra_buf_len = 0;
-
+    let mut bw = BitWriter::from_vec(std::mem::take(extra_bits));
+    
     let mut pack_extra_bits = |extra: u16, n_extra: u8| {
         if n_extra > 0 {
-            extra_buf = (extra_buf << n_extra) | extra as u64;
-            extra_buf_len += n_extra as usize;
-            while extra_buf_len >= 8 {
-                extra_buf_len -= 8;
-                extra_bits.push((extra_buf >> extra_buf_len) as u8);
-                extra_buf &= (1 << extra_buf_len) - 1;
-            }
+            bw.write(extra as u32, n_extra as usize);
         }
     };
 
@@ -1272,9 +1261,7 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
         }
     }
 
-    if extra_buf_len > 0 {
-        extra_bits.push((extra_buf << (8 - extra_buf_len)) as u8);
-    }
+    *extra_bits = bw.finish();
 
     let sym_comp = huff_encode_uint16(&symbols, version)?;
     let mut dist_comp = Vec::new();
@@ -1622,13 +1609,14 @@ fn deflate_blocked_decode_with_version(data: &[u8], expected_len: usize, version
     let mut descs: Vec<(usize, &[u8], usize, u8)> = Vec::with_capacity(num_blocks);
     let mut out_off = 0usize;
     for i in 0..num_blocks {
-        if pos + 9 > data.len() {
+        if pos + 10 > data.len() {
             return Err(format!("blocked: block {} header overrun", i));
         }
         let comp_size = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         let orig_size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
         let flag = data[pos + 8];
-        pos += 9;
+        let _lane = data[pos + 9]; // read the lane byte to advance correctly
+        pos += 10;
 
         if pos + comp_size > data.len() {
             return Err(format!("blocked: block {} data overrun", i));
@@ -2248,7 +2236,7 @@ impl<R: Read + Seek> DecompressReader<R> {
                 let header_size = 10;
                 let mut header_buf = vec![0u8; header_size];
 
-                for i in 0..num_blocks {
+                for _i in 0..num_blocks {
                     self.inner.read_exact(&mut header_buf)?;
                     let comp_size = u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]]) as usize;
                     let orig_size = u32::from_le_bytes([header_buf[4], header_buf[5], header_buf[6], header_buf[7]]) as usize;

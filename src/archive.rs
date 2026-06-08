@@ -222,7 +222,71 @@ fn walk_dir(dir: &Path, base: &Path, out: &mut Vec<InputFile>) -> io::Result<()>
     Ok(())
 }
 
-// ── Metadata helpers ────────────────────────────────────────────────────────
+// ── Metadata & Disk helpers ────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+fn get_free_space(path: &Path) -> Option<u64> {
+    let output = std::process::Command::new("df")
+        .arg("-k")
+        .arg(path)
+        .output()
+        .ok()?;
+    
+    if !output.status.success() {
+        return None;
+    }
+    
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    lines.next()?; // Skip header
+    let data_line = lines.next()?;
+    
+    let parts: Vec<&str> = data_line.split_whitespace().collect();
+    if parts.len() >= 4 {
+        // POSIX df -k format: Filesystem 1024-blocks Used Available Capacity Mounted on
+        let avail_1k = parts[3].parse::<u64>().ok()?;
+        return Some(avail_1k * 1024);
+    }
+    None
+}
+
+#[cfg(windows)]
+fn get_free_space(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    
+    let mut path_wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    path_wide.push(0);
+
+    extern "system" {
+        fn GetDiskFreeSpaceExW(
+            lpDirectoryName: *const u16,
+            lpFreeBytesAvailableToCaller: *mut u64,
+            lpTotalNumberOfBytes: *mut u64,
+            lpTotalNumberOfFreeBytes: *mut u64,
+        ) -> i32;
+    }
+
+    let mut free_bytes = 0u64;
+    let res = unsafe {
+        GetDiskFreeSpaceExW(
+            path_wide.as_ptr(),
+            &mut free_bytes,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+
+    if res != 0 {
+        Some(free_bytes)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn get_free_space(_path: &Path) -> Option<u64> {
+    None
+}
 
 fn format_duration(secs: u64) -> String {
     let m = secs / 60;
@@ -231,6 +295,7 @@ fn format_duration(secs: u64) -> String {
 }
 
 fn print_progress(
+    action: &str,
     file_name: &str,
     bytes_processed: u64,
     file_size: u64,
@@ -252,19 +317,32 @@ fn print_progress(
     let pct = if file_size == 0 { 0.0 } else { bytes_processed as f64 / file_size as f64 * 100.0 };
     let ratio = if bytes_processed == 0 { 0.0 } else { stored_size as f64 / bytes_processed as f64 * 100.0 };
     
-    eprint!(
-        "\r\x1b[K  compressing {}: {:.1} / {:.1} MB ({:.1}%) | {:.1} MB/s | Ratio: {:.1}% | ETA: {}",
-        file_name,
-        bytes_processed as f64 / 1_048_576.0,
-        file_size as f64 / 1_048_576.0,
-        pct,
-        speed_mb,
-        ratio,
-        format_duration(eta_secs)
-    );
+    if stored_size > 0 {
+        eprint!(
+            "\r\x1b[K  {} {}: {:.1} / {:.1} MB ({:.1}%) | {:.1} MB/s | Ratio: {:.1}% | ETA: {}",
+            action,
+            file_name,
+            bytes_processed as f64 / 1_048_576.0,
+            file_size as f64 / 1_048_576.0,
+            pct,
+            speed_mb,
+            ratio,
+            format_duration(eta_secs)
+        );
+    } else {
+        eprint!(
+            "\r\x1b[K  {} {}: {:.1} / {:.1} MB ({:.1}%) | {:.1} MB/s | ETA: {}",
+            action,
+            file_name,
+            bytes_processed as f64 / 1_048_576.0,
+            file_size as f64 / 1_048_576.0,
+            pct,
+            speed_mb,
+            format_duration(eta_secs)
+        );
+    }
     let _ = std::io::stderr().flush();
 }
-
 fn file_mode(meta: &fs::Metadata) -> u32 {
     #[cfg(unix)]
     {
@@ -352,7 +430,7 @@ fn compress_stream_blocked<R: Read, W: Write, T: codec::TableIndex>(
         }
 
         if show_progress {
-            print_progress(file_name, *orig_size, file_size, stored_size, start_time);
+            print_progress("compressing", file_name, *orig_size, file_size, stored_size, start_time);
         }
     }
     if show_progress {
@@ -375,7 +453,7 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
     show_progress: bool,
     file_name: &str,
 ) -> io::Result<()> {
-    let groups = (file_size as usize) / stride;
+    let groups = file_size / (stride as u64);
     let mut prev_byte = [0u8; 4];
 
     // Buffer for each lane before compression
@@ -410,14 +488,15 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
         // Distribute to lanes
         let mut i = 0;
         while i < chunk_len {
-            let curr_file_pos = bytes_processed + i;
-            if curr_file_pos >= stride * groups {
+            let curr_file_pos = bytes_processed as u64 + i as u64;
+            let stride_u64 = stride as u64;
+            if curr_file_pos >= stride_u64 * groups {
                 // Remainder bytes are raw-copied to the last lane's buffer
                 lane_buffers[stride - 1].push(chunk[i]);
                 i += 1;
             } else {
                 // Distribute groups of stride bytes
-                let limit = std::cmp::min(chunk_len - i, stride * groups - curr_file_pos);
+                let limit = std::cmp::min((chunk_len - i) as u64, stride_u64 * groups - curr_file_pos) as usize;
                 let num_groups = limit / stride;
                 for g in 0..num_groups {
                     for s in 0..stride {
@@ -470,7 +549,7 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
         }
 
         if show_progress {
-            print_progress(file_name, bytes_processed as u64, file_size, stored_size, start_time);
+            print_progress("compressing", file_name, bytes_processed as u64, file_size, stored_size, start_time);
         }
     }
 
@@ -534,6 +613,25 @@ pub fn create(
             io::ErrorKind::InvalidInput,
             "no regular files to archive",
         ));
+    }
+
+    let mut total_size = 0u64;
+    for f in &files {
+        if let Ok(meta) = fs::metadata(&f.abs) {
+            total_size += meta.len();
+        }
+    }
+    
+    // Assume worst case: no compression + 1% format overhead + 1MB
+    let required_space = total_size + (total_size / 100) + 1_048_576;
+    let archive_dir = Path::new(archive_path).parent().unwrap_or_else(|| Path::new("."));
+    if let Some(free_space) = get_free_space(archive_dir) {
+        if free_space < required_space {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Not enough free disk space for archive. Required: {:.1} MB, Free: {:.1} MB", required_space as f64 / 1_048_576.0, free_space as f64 / 1_048_576.0),
+            ));
+        }
     }
 
     let format_version = 1;
@@ -1047,7 +1145,7 @@ pub fn list_entries(archive_path: &str) -> io::Result<Vec<EntryMeta>> {
     Ok(out)
 }
 
-fn extract_entry_payload<R: Read + Seek, W: Write>(
+fn extract_entry_payload<R: Read + Seek + Send, W: Write>(
     r: &mut R,
     meta: &EntryMeta,
     w: &mut W,
@@ -1068,7 +1166,7 @@ fn extract_entry_payload<R: Read + Seek, W: Write>(
         let c = crc32(&data);
         w.write_all(&data)?;
         c
-    } else if meta.stored_size < 512 * 1024 * 1024 {
+    } else if meta.stored_size < 128 * 1024 * 1024 {
         let mut comp_data = vec![0u8; meta.stored_size as usize];
         r.read_exact(&mut comp_data)?;
         let decomp = codec::smart_decompress_with_version(&comp_data, method, meta.orig_size as usize, version)
@@ -1086,17 +1184,54 @@ fn extract_entry_payload<R: Read + Seek, W: Write>(
             version,
         );
 
-        let mut c = 0u32;
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            let n = dec.read(&mut buf)?;
-            if n == 0 {
-                break;
+        let start_time = std::time::Instant::now();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<io::Result<Option<Vec<u8>>>>(8);
+
+        let res = std::thread::scope(|s| {
+            let reader_thread = s.spawn(move || {
+                loop {
+                    let mut buf = vec![0u8; 1024 * 1024]; // 1MB buffers
+                    match dec.read(&mut buf) {
+                        Ok(n) if n == 0 => {
+                            let _ = tx.send(Ok(None));
+                            break;
+                        }
+                        Ok(n) => {
+                            buf.truncate(n);
+                            if tx.send(Ok(Some(buf))).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(e));
+                            break;
+                        }
+                    }
+                }
+            });
+
+            let mut c = 0u32;
+            let mut decomp_bytes = 0u64;
+
+            for msg in rx {
+                match msg {
+                    Ok(Some(buf)) => {
+                        c = crc32_update(c, &buf);
+                        if let Err(e) = w.write_all(&buf) {
+                            return Err(e);
+                        }
+                        decomp_bytes += buf.len() as u64;
+                        print_progress("extracting", &meta.path, decomp_bytes, meta.orig_size, 0, start_time);
+                    }
+                    Ok(None) => break,
+                    Err(e) => return Err(e),
+                }
             }
-            c = crc32_update(c, &buf[..n]);
-            w.write_all(&buf[..n])?;
-        }
-        c
+            eprint!("\r\x1b[K"); // Clear the line when done
+            let _ = reader_thread.join();
+            Ok::<_, io::Error>(c)
+        });
+        res?
     };
 
     r.seek(SeekFrom::Start(start_pos + meta.stored_size))?;
@@ -1205,6 +1340,22 @@ pub fn extract(
     let (mut r, count, version) = open_archive(archive_path)?;
     let dest = Path::new(dest_dir);
     let mut extracted = 0usize;
+
+    if let Ok(Some(entries)) = read_cd_index(&mut r, count, file_len, version) {
+        let total_orig_size: u64 = entries.iter()
+            .filter(|e| filter.is_empty() || filter.iter().any(|f| f == &e.path))
+            .map(|e| e.orig_size)
+            .sum();
+        
+        if let Some(free_space) = get_free_space(dest) {
+            if free_space < total_orig_size {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Not enough free disk space for extraction. Required: {:.1} MB, Free: {:.1} MB", total_orig_size as f64 / 1_048_576.0, free_space as f64 / 1_048_576.0),
+                ));
+            }
+        }
+    }
 
     if !filter.is_empty() {
         if let Ok(Some(entries)) = read_cd_index(&mut r, count, file_len, version) {
@@ -1443,7 +1594,7 @@ mod tests {
 
         let archive = dir.join("out.bnc");
         let inputs = vec![src.to_string_lossy().into_owned()];
-        let stats = create(archive.to_str().unwrap(), &inputs, 1, false).unwrap();
+        let stats = create(archive.to_str().unwrap(), &inputs, 1, false, false).unwrap();
         assert_eq!(stats.files, 3);
 
         // 1. Verify list entries (should read from CD)
