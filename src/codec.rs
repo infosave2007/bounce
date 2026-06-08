@@ -282,6 +282,12 @@ fn package_merge(
     result
 }
 
+#[derive(Clone, Copy, Default)]
+struct TableEntry {
+    sym: u16,
+    bits: u8,
+}
+
 const HUFF_UINT16_ALPHABET_SIZE: usize = 286;
 
 fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
@@ -469,14 +475,10 @@ fn huff_decode_uint16(data: &[u8], expected_len: usize) -> Result<Vec<u16>, Stri
         next_code[bits] = code;
     }
 
-    #[derive(Clone, Copy, Default)]
-    struct HuffEntry {
-        sym: u16,
-        bits: u8,
-    }
+    let mut root_table = [TableEntry::default(); 512];
+    let mut sub_tables = Vec::new();
+    let mut sub_table_map = [-1i16; 512];
 
-    let table_size = 1 << max_bits;
-    let mut table = vec![HuffEntry::default(); table_size];
     for sym in 0..HUFF_UINT16_ALPHABET_SIZE {
         let cl = code_lens[sym] as usize;
         if cl == 0 {
@@ -484,11 +486,39 @@ fn huff_decode_uint16(data: &[u8], expected_len: usize) -> Result<Vec<u16>, Stri
         }
         let c = next_code[cl];
         next_code[cl] += 1;
-        let pad = max_bits - cl;
-        for p in 0..(1 << pad) {
-            let idx = ((c << pad) | p as u32) as usize;
-            if idx < table_size {
-                table[idx] = HuffEntry {
+
+        if cl <= 9 {
+            let pad = 9 - cl;
+            let start = (c << pad) as usize;
+            let end = start + (1 << pad);
+            for idx in start..end {
+                root_table[idx] = TableEntry {
+                    sym: sym as u16,
+                    bits: cl as u8,
+                };
+            }
+        } else {
+            let prefix = (c >> (cl - 9)) as usize;
+            let sub_idx = if sub_table_map[prefix] == -1 {
+                let idx = sub_tables.len() / 64;
+                sub_tables.resize(sub_tables.len() + 64, TableEntry::default());
+                sub_table_map[prefix] = idx as i16;
+                root_table[prefix] = TableEntry {
+                    sym: idx as u16,
+                    bits: 255,
+                };
+                idx
+            } else {
+                sub_table_map[prefix] as usize
+            };
+
+            let suffix = c & ((1 << (cl - 9)) - 1);
+            let suffix_pad = 15 - cl;
+            let start = (suffix << suffix_pad) as usize;
+            let end = start + (1 << suffix_pad);
+            let base_idx = sub_idx * 64;
+            for idx in start..end {
+                sub_tables[base_idx + idx] = TableEntry {
                     sym: sym as u16,
                     bits: cl as u8,
                 };
@@ -496,17 +526,29 @@ fn huff_decode_uint16(data: &[u8], expected_len: usize) -> Result<Vec<u16>, Stri
         }
     }
 
+    let sub_tables_slice = sub_tables.as_slice();
     let mut out = Vec::with_capacity(expected_len);
     let mut reader = BitReader::new(bitstream);
 
     while out.len() < expected_len {
-        let peek = reader.peek(max_bits) as usize;
-        let entry = table[peek];
-        if entry.bits == 0 {
-            return Err("huffUint16: invalid code".to_string());
+        let peek15 = reader.peek(15) as usize;
+        let root_idx = peek15 >> 6;
+        let entry = unsafe { *root_table.get_unchecked(root_idx) };
+        if entry.bits == 255 {
+            let sub_idx = (entry.sym as usize) * 64 + (peek15 & 0x3F);
+            let sub_entry = unsafe { *sub_tables_slice.get_unchecked(sub_idx) };
+            if sub_entry.bits == 0 {
+                return Err("huffUint16: invalid code".to_string());
+            }
+            out.push(sub_entry.sym);
+            reader.consume(sub_entry.bits as usize);
+        } else {
+            if entry.bits == 0 {
+                return Err("huffUint16: invalid code".to_string());
+            }
+            out.push(entry.sym);
+            reader.consume(entry.bits as usize);
         }
-        out.push(entry.sym);
-        reader.consume(entry.bits as usize);
     }
 
     if out.len() != expected_len {
@@ -631,14 +673,10 @@ fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
         next_code[bits] = code;
     }
 
-    #[derive(Clone, Copy, Default)]
-    struct HuffEntry {
-        sym: u8,
-        bits: u8,
-    }
+    let mut root_table = [TableEntry::default(); 512];
+    let mut sub_tables = Vec::new();
+    let mut sub_table_map = [-1i16; 512];
 
-    let table_size = 1 << max_bits;
-    let mut table = vec![HuffEntry::default(); table_size];
     for sym in 0..HUFF_ALPHABET_SIZE {
         let cl = code_lens[sym] as usize;
         if cl == 0 {
@@ -646,29 +684,69 @@ fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
         }
         let c = next_code[cl];
         next_code[cl] += 1;
-        let pad = max_bits - cl;
-        for p in 0..(1 << pad) {
-            let idx = ((c << pad) | p as u32) as usize;
-            if idx < table_size {
-                table[idx] = HuffEntry {
-                    sym: sym as u8,
+
+        if cl <= 9 {
+            let pad = 9 - cl;
+            let start = (c << pad) as usize;
+            let end = start + (1 << pad);
+            for idx in start..end {
+                root_table[idx] = TableEntry {
+                    sym: sym as u16,
+                    bits: cl as u8,
+                };
+            }
+        } else {
+            let prefix = (c >> (cl - 9)) as usize;
+            let sub_idx = if sub_table_map[prefix] == -1 {
+                let idx = sub_tables.len() / 64;
+                sub_tables.resize(sub_tables.len() + 64, TableEntry::default());
+                sub_table_map[prefix] = idx as i16;
+                root_table[prefix] = TableEntry {
+                    sym: idx as u16,
+                    bits: 255,
+                };
+                idx
+            } else {
+                sub_table_map[prefix] as usize
+            };
+
+            let suffix = c & ((1 << (cl - 9)) - 1);
+            let suffix_pad = 15 - cl;
+            let start = (suffix << suffix_pad) as usize;
+            let end = start + (1 << suffix_pad);
+            let base_idx = sub_idx * 64;
+            for idx in start..end {
+                sub_tables[base_idx + idx] = TableEntry {
+                    sym: sym as u16,
                     bits: cl as u8,
                 };
             }
         }
     }
 
+    let sub_tables_slice = sub_tables.as_slice();
     let mut out = Vec::with_capacity(expected_len);
     let mut reader = BitReader::new(bitstream);
 
     while out.len() < expected_len {
-        let peek = reader.peek(max_bits) as usize;
-        let entry = table[peek];
-        if entry.bits == 0 {
-            return Err("huff: invalid code".to_string());
+        let peek15 = reader.peek(15) as usize;
+        let root_idx = peek15 >> 6;
+        let entry = unsafe { *root_table.get_unchecked(root_idx) };
+        if entry.bits == 255 {
+            let sub_idx = (entry.sym as usize) * 64 + (peek15 & 0x3F);
+            let sub_entry = unsafe { *sub_tables_slice.get_unchecked(sub_idx) };
+            if sub_entry.bits == 0 {
+                return Err("huff: invalid code".to_string());
+            }
+            out.push(sub_entry.sym as u8);
+            reader.consume(sub_entry.bits as usize);
+        } else {
+            if entry.bits == 0 {
+                return Err("huff: invalid code".to_string());
+            }
+            out.push(entry.sym as u8);
+            reader.consume(entry.bits as usize);
         }
-        out.push(entry.sym);
-        reader.consume(entry.bits as usize);
     }
 
     if out.len() != expected_len {

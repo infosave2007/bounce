@@ -177,7 +177,7 @@ Unquantized IEEE-754 neural network weights. This demonstrates the efficiency of
 
 | Tool | Size | Ratio | C (Compression) | D (Decompression) |
 |------|-----:|------:|----------------:|------------------:|
-| **bounce** | **344,830,307** | **73.1%** | **124.4 MB/s** | **657.7 MB/s** |
+| **bounce** | **344,830,307** | **73.1%** | **124.4 MB/s** | **661.1 MB/s** |
 | gzip -9 | 374,391,731 | 79.3% | 18.1 MB/s | 352.9 MB/s |
 | lz4 -9 | 468,560,164 | 99.3% | 189.5 MB/s | 2044.8 MB/s |
 | zstd -19 | 359,412,232 | 76.2% | 12.4 MB/s | 383.5 MB/s |
@@ -187,7 +187,7 @@ Unquantized IEEE-754 neural network weights. This demonstrates the efficiency of
 
 | Tool | Size | Ratio | C (Compression) | D (Decompression) |
 |------|-----:|------:|----------------:|------------------:|
-| **bounce** | 467,560 | 33.9% | 3.7 MB/s | 36.6 MB/s |
+| **bounce** | 467,560 | 33.9% | 3.7 MB/s | 36.1 MB/s |
 | gzip -9 | 404,664 | 29.3% | 15.5 MB/s | 36.0 MB/s |
 | lz4 -9 | 456,579 | 33.1% | 20.4 MB/s | 36.7 MB/s |
 | zstd -19 | 45,772 | 3.3% | 18.9 MB/s | 35.8 MB/s |
@@ -199,7 +199,7 @@ Unquantized IEEE-754 neural network weights. This demonstrates the efficiency of
 
 | Tool | Size | Ratio | C (Compression) | D (Decompression) |
 |------|-----:|------:|----------------:|------------------:|
-| **bounce** | 100,265 | 18.9% | 8.1 MB/s | 14.2 MB/s |
+| **bounce** | 98,772 | 18.6% | 8.1 MB/s | 14.2 MB/s |
 | gzip -9 | 101,897 | 19.2% | 10.3 MB/s | 14.6 MB/s |
 | lz4 -9 | 122,076 | 23.0% | 12.1 MB/s | 14.7 MB/s |
 | zstd -19 | 84,994 | 16.0% | 4.7 MB/s | 14.6 MB/s |
@@ -213,7 +213,7 @@ Quantized weights are close to random data—serving as an honest test on a larg
 
 | Tool | Size | Ratio | C (Compression) | D (Decompression) |
 |------|-----:|------:|----------------:|------------------:|
-| **bounce** | 1,066,598,492 | 99.3% | 155.2 MB/s | 803.9 MB/s |
+| **bounce** | 1,066,598,492 | 99.3% | 158.4 MB/s | 862.9 MB/s |
 | gzip -9 | 1,063,316,152 | 99.0% | 53.1 MB/s | 510.2 MB/s |
 | lz4 -9 | 1,066,181,306 | 99.3% | 346.4 MB/s | **4102.7 MB/s** |
 | zstd -19 -T0 | 1,060,561,565 | 98.8% | 22.9 MB/s | 1258.9 MB/s |
