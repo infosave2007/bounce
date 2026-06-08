@@ -4,7 +4,7 @@
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 ![Rust](https://img.shields.io/badge/rust-1.70%2B-orange)
 
-**bounce** is a highly optimized, zero-dependency file archiver written in pure Rust. It is designed for maximum speed and safety, featuring dynamic pipeline routing, multi-threading, and aggressive data restructuring for large binary payloads (such as neural network weights).
+**bounce** is a fast, zero-dependency file archiver written in pure Rust. Built on the **Big Bounce** codec with dynamic method routing, multi-threading, and optimized byte-shuffling for large binary payloads. It is designed for maximum speed and safety.
 
 ## Key Features
 
@@ -62,6 +62,7 @@ bounce <command> [options] <archive> [files...]
 
 | Option | Description |
 |--------|-------------|
+| `-1 ... -8` | Compression level (default: `-1`). `-1` is fastest, `-8` provides maximum compression via larger search windows |
 | `-o, --output <dir>` | Directory for extraction (default: current directory) |
 | `-c, --stdout` | Output decompressed file(s) directly to stdout |
 | `-f, --force` | Overwrite existing files during extraction |
