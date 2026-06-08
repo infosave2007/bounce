@@ -32,7 +32,7 @@ COMMANDS:
 
 OPTIONS:
     -1 ... -8            Compression levels (default: -1):
-                           -1: 64 KB window, 32 KB blocks (fastest)
+                            -1: 64 KB window, 128 KB blocks (fastest)
                            -2: 128 KB window, 128 KB blocks
                            -3: 256 KB window, 256 KB blocks
                            -4: 512 KB window, 512 KB blocks

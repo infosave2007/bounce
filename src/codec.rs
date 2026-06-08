@@ -9,8 +9,8 @@ use std::io::{self, Read, Seek, SeekFrom};
 
 // Distance code table (deflate-style, inspired by FCD factorization)
 // code → (base_distance, extra_bits_count)
-const DIST_CODE_TABLE: [(u32, u8); 46] = [
-    (0, 0), (1, 0), (2, 0), (3, 0),          // codes 0-3: dist 1-4 exact
+const DIST_CODE_TABLE: [(u16, u8); 32] = [
+    (0, 0), (1, 0), (2, 0), (3, 0),        // codes 0-3: dist 1-4 exact
     (4, 1), (6, 1),                          // codes 4-5: 1 extra bit
     (8, 2), (12, 2),                         // codes 6-7: 2 extra bits
     (16, 3), (24, 3),                        // codes 8-9: 3 extra bits
@@ -25,39 +25,35 @@ const DIST_CODE_TABLE: [(u32, u8); 46] = [
     (8192, 12), (12288, 12),                 // codes 26-27: 12 extra bits
     (16384, 13), (24576, 13),                // codes 28-29: 13 extra bits
     (32768, 14), (49152, 14),                // codes 30-31: 14 extra bits (64KB window)
-    (65536, 15), (98304, 15),                // codes 32-33: 15 extra bits (128KB window)
-    (131072, 16), (196608, 16),              // codes 34-35: 16 extra bits (256KB window)
-    (262144, 17), (393216, 17),              // codes 36-37: 17 extra bits (512KB window)
-    (524288, 18), (786432, 18),              // codes 38-39: 18 extra bits (1MB window)
-    (1048576, 19), (1572864, 19),            // codes 40-41: 19 extra bits (2MB window)
-    (2097152, 20), (3145728, 20),            // codes 42-43: 20 extra bits (4MB window)
-    (4194304, 21), (6291456, 21),            // codes 44-45: 21 extra bits (8MB window)
 ];
 
-fn dist_to_code(dist: u32) -> (u8, u32, u8) {
-    if dist < 4 {
-        return (dist as u8, 0, 0);
-    }
-    let mut low = 0;
-    let mut high = DIST_CODE_TABLE.len() - 1;
-    let mut code = 0;
-    while low <= high {
-        let mid = (low + high) / 2;
-        if DIST_CODE_TABLE[mid].0 <= dist {
-            code = mid;
-            low = mid + 1;
+const DIST_LOOKUP: [u8; 65536] = {
+    let mut lookup = [0u8; 65536];
+    let mut j = 0;
+    while j < 32 {
+        let start = DIST_CODE_TABLE[j].0 as usize;
+        let end = if j + 1 < 32 {
+            DIST_CODE_TABLE[j + 1].0 as usize
         } else {
-            if mid == 0 {
-                break;
-            }
-            high = mid - 1;
+            65536
+        };
+        let mut i = start;
+        while i < end {
+            lookup[i] = j as u8;
+            i += 1;
         }
+        j += 1;
     }
-    let (base, extra_bits) = DIST_CODE_TABLE[code];
-    (code as u8, dist - base, extra_bits)
+    lookup
+};
+
+fn dist_to_code(dist: u16) -> (u8, u16, u8) {
+    let code = DIST_LOOKUP[dist as usize];
+    let (base, extra_bits) = DIST_CODE_TABLE[code as usize];
+    (code, dist - base, extra_bits)
 }
 
-fn code_to_dist(code: u8, extra: u32) -> u32 {
+fn code_to_dist(code: u8, extra: u16) -> u16 {
     DIST_CODE_TABLE[code as usize].0 + extra
 }
 
@@ -932,11 +928,65 @@ fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
             reader.consume(bits as usize);
         }
     }
-
     if out.len() != expected_len {
         return Err(format!("huff: got {} want {}", out.len(), expected_len));
     }
     Ok(out)
+}
+
+pub(crate) trait TableIndex: Copy + Clone + PartialEq + Send + Sync {
+    const SENTINEL: Self;
+    fn to_usize(self) -> usize;
+    fn from_usize(val: usize) -> Self;
+    fn is_sentinel(self) -> bool;
+}
+
+impl TableIndex for u16 {
+    const SENTINEL: u16 = u16::MAX;
+    #[inline(always)]
+    fn to_usize(self) -> usize {
+        self as usize
+    }
+    #[inline(always)]
+    fn from_usize(val: usize) -> Self {
+        val as u16
+    }
+    #[inline(always)]
+    fn is_sentinel(self) -> bool {
+        self == u16::MAX
+    }
+}
+
+impl TableIndex for u32 {
+    const SENTINEL: u32 = u32::MAX;
+    #[inline(always)]
+    fn to_usize(self) -> usize {
+        self as usize
+    }
+    #[inline(always)]
+    fn from_usize(val: usize) -> Self {
+        val as u32
+    }
+    #[inline(always)]
+    fn is_sentinel(self) -> bool {
+        self == u32::MAX
+    }
+}
+
+impl TableIndex for i32 {
+    const SENTINEL: i32 = -1;
+    #[inline(always)]
+    fn to_usize(self) -> usize {
+        self as usize
+    }
+    #[inline(always)]
+    fn from_usize(val: usize) -> Self {
+        val as i32
+    }
+    #[inline(always)]
+    fn is_sentinel(self) -> bool {
+        self == -1
+    }
 }
 
 pub(crate) const LZV2_WINDOW_SIZE: usize = 65536;
@@ -988,15 +1038,21 @@ fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 pub fn deflate_style_encode_with_version(data: &[u8], window_size: usize, version: u8) -> Option<Vec<u8>> {
-    let mut head = vec![-1i32; LZV2_HASH_SIZE];
-    let mut prev = vec![0i32; window_size];
-    deflate_style_encode_with_buffers(data, &mut head, &mut prev, window_size, version)
+    if window_size <= 65536 && data.len() <= 65536 {
+        let mut head = vec![u16::MAX; LZV2_HASH_SIZE];
+        let mut prev = vec![u16::MAX; window_size];
+        deflate_style_encode_with_buffers(data, &mut head, &mut prev, window_size, version)
+    } else {
+        let mut head = vec![u32::MAX; LZV2_HASH_SIZE];
+        let mut prev = vec![u32::MAX; window_size];
+        deflate_style_encode_with_buffers(data, &mut head, &mut prev, window_size, version)
+    }
 }
 
-pub(crate) fn deflate_style_encode_with_buffers(
+pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
     data: &[u8],
-    head: &mut [i32],
-    prev: &mut [i32],
+    head: &mut [T],
+    prev: &mut [T],
     window_size: usize,
     version: u8,
 ) -> Option<Vec<u8>> {
@@ -1012,7 +1068,7 @@ pub(crate) fn deflate_style_encode_with_buffers(
     let mut extra_buf = 0u64;
     let mut extra_buf_len = 0;
 
-    let mut pack_extra_bits = |extra: u32, n_extra: u8| {
+    let mut pack_extra_bits = |extra: u16, n_extra: u8| {
         if n_extra > 0 {
             extra_buf = (extra_buf << n_extra) | extra as u64;
             extra_buf_len += n_extra as usize;
@@ -1033,13 +1089,12 @@ pub(crate) fn deflate_style_encode_with_buffers(
             let h = lzv2_hash(data, i) as usize;
             let mut pos = head[h];
             prev[i & (window_size - 1)] = pos;
-            head[h] = i as i32;
-            let min_pos = (i as i32) - (window_size as i32);
-            let min_pos = if min_pos < 0 { 0 } else { min_pos as usize };
+            head[h] = T::from_usize(i);
+            let min_pos = i.saturating_sub(window_size);
             let mut cl = 0;
             let mut max_chain = LZV2_MAX_CHAIN;
-            while pos >= (min_pos as i32) && cl < max_chain {
-                let p = pos as usize;
+            while !pos.is_sentinel() && pos.to_usize() >= min_pos && cl < max_chain {
+                let p = pos.to_usize();
                 let mut limit = n - i;
                 if limit > LZV2_MAX_MATCH {
                     limit = LZV2_MAX_MATCH;
@@ -1069,11 +1124,10 @@ pub(crate) fn deflate_style_encode_with_buffers(
             if best_len < GOOD_MATCH && i + 1 + LZV2_MIN_MATCH <= n && best_len < LZV2_MAX_MATCH {
                 let h2 = lzv2_hash(data, i + 1) as usize;
                 let mut pos2 = head[h2];
-                let min_pos2 = (i as i32) + 1 - (window_size as i32);
-                let min_pos2 = if min_pos2 < 0 { 0 } else { min_pos2 as usize };
+                let min_pos2 = (i + 1).saturating_sub(window_size);
                 let mut cl2 = 0;
-                while pos2 >= (min_pos2 as i32) && cl2 < LZV2_MAX_CHAIN / 2 {
-                    let p = pos2 as usize;
+                while !pos2.is_sentinel() && pos2.to_usize() >= min_pos2 && cl2 < LZV2_MAX_CHAIN / 2 {
+                    let p = pos2.to_usize();
                     let mut limit = n - (i + 1);
                     if limit > LZV2_MAX_MATCH {
                         limit = LZV2_MAX_MATCH;
@@ -1098,18 +1152,17 @@ pub(crate) fn deflate_style_encode_with_buffers(
                 i += 1;
                 let h3 = lzv2_hash(data, i) as usize;
                 prev[i & (window_size - 1)] = head[h3];
-                head[h3] = i as i32;
+                head[h3] = T::from_usize(i);
 
                 // Lazy-2: check if we should skip i again in favor of i+1
                 let mut skip2 = false;
                 if best_len < GOOD_MATCH && i + 1 + LZV2_MIN_MATCH <= n && best_len < LZV2_MAX_MATCH {
                     let h2 = lzv2_hash(data, i + 1) as usize;
                     let mut pos2 = head[h2];
-                    let min_pos2 = (i as i32) + 1 - (window_size as i32);
-                    let min_pos2 = if min_pos2 < 0 { 0 } else { min_pos2 as usize };
+                    let min_pos2 = (i + 1).saturating_sub(window_size);
                     let mut cl2 = 0;
-                    while pos2 >= (min_pos2 as i32) && cl2 < LZV2_MAX_CHAIN / 2 {
-                        let p = pos2 as usize;
+                    while !pos2.is_sentinel() && pos2.to_usize() >= min_pos2 && cl2 < LZV2_MAX_CHAIN / 2 {
+                        let p = pos2.to_usize();
                         let mut limit = n - (i + 1);
                         if limit > LZV2_MAX_MATCH {
                             limit = LZV2_MAX_MATCH;
@@ -1134,24 +1187,24 @@ pub(crate) fn deflate_style_encode_with_buffers(
                     i += 1;
                     let h3 = lzv2_hash(data, i) as usize;
                     prev[i & (window_size - 1)] = head[h3];
-                    head[h3] = i as i32;
+                    head[h3] = T::from_usize(i);
                 }
             }
 
             let (len_code, len_extra, len_n_extra) = len_to_code(best_len as u16);
-            let (dist_code, dist_extra, dist_n_extra) = dist_to_code((best_dist - 1) as u32);
+            let (dist_code, dist_extra, dist_n_extra) = dist_to_code((best_dist - 1) as u16);
 
             symbols.push(256 + len_code as u16);
             dist_codes.push(dist_code);
 
-            pack_extra_bits(len_extra as u32, len_n_extra);
+            pack_extra_bits(len_extra, len_n_extra);
             pack_extra_bits(dist_extra, dist_n_extra);
 
             for j in 1..best_len {
                 if i + j + LZV2_MIN_MATCH <= n {
                     let h = lzv2_hash(data, i + j) as usize;
                     prev[(i + j) & (window_size - 1)] = head[h];
-                    head[h] = (i + j) as i32;
+                    head[h] = T::from_usize(i + j);
                 }
             }
             i += best_len;
@@ -1241,7 +1294,7 @@ pub(crate) fn deflate_style_decode_with_version(data: &[u8], expected_len: usize
     let mut eb_buf_len = 0;
     let mut eb_idx = 0;
 
-    let mut read_extra_bits = |n_extra: u8| -> Result<u32, String> {
+    let mut read_extra_bits = |n_extra: u8| -> Result<u16, String> {
         if n_extra == 0 {
             return Ok(0);
         }
@@ -1255,7 +1308,7 @@ pub(crate) fn deflate_style_decode_with_version(data: &[u8], expected_len: usize
             return Err("deflateStyle: extra bits underrun".to_string());
         }
         eb_buf_len -= n;
-        let val = ((eb_buf >> eb_buf_len) & ((1 << n) - 1)) as u32;
+        let val = ((eb_buf >> eb_buf_len) & ((1 << n) - 1)) as u16;
         eb_buf &= (1 << eb_buf_len) - 1;
         Ok(val)
     };
@@ -1274,14 +1327,14 @@ pub(crate) fn deflate_style_decode_with_version(data: &[u8], expected_len: usize
             }
             let n_extra_len = LEN_CODE_TABLE[len_code as usize].1;
             let extra_len = read_extra_bits(n_extra_len)?;
-            let ml = code_to_len(len_code, extra_len as u16) as usize;
+            let ml = code_to_len(len_code, extra_len) as usize;
 
             if di >= num_dist {
                 return Err("deflateStyle: dist underrun".to_string());
             }
             let dist_code = dist_code_bytes[di];
             di += 1;
-            if dist_code >= 46 {
+            if dist_code >= 32 {
                 return Err(format!("deflateStyle: invalid dist code {}", dist_code));
             }
             let n_extra_dist = DIST_CODE_TABLE[dist_code as usize].1;
@@ -1409,7 +1462,20 @@ pub fn deflate_blocked_encode_with_version(
     if n < 128 {
         return None;
     }
+    if window_size <= 65536 && block_size <= 65536 {
+        deflate_blocked_encode_with_version_impl::<u16>(data, window_size, block_size, version)
+    } else {
+        deflate_blocked_encode_with_version_impl::<u32>(data, window_size, block_size, version)
+    }
+}
 
+fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
+    data: &[u8],
+    window_size: usize,
+    block_size: usize,
+    version: u8,
+) -> Option<Vec<u8>> {
+    let n = data.len();
     let num_blocks = (n + block_size - 1) / block_size;
     let threads = num_threads(num_blocks);
 
@@ -1419,13 +1485,13 @@ pub fn deflate_blocked_encode_with_version(
         .collect();
 
     if threads <= 1 {
-        let mut head = vec![-1i32; LZV2_HASH_SIZE];
-        let mut prev = vec![0i32; window_size];
+        let mut head = vec![T::SENTINEL; LZV2_HASH_SIZE];
+        let mut prev = vec![T::SENTINEL; window_size];
         for b in 0..num_blocks {
             let start = b * block_size;
             let end = std::cmp::min(start + block_size, n);
             let block = &data[start..end];
-            head.fill(-1);
+            head.fill(T::SENTINEL);
             let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, window_size, version);
             let res = encode_block_result(block, c_opt);
             encoded_blocks[b].write(res);
@@ -1438,14 +1504,14 @@ pub fn deflate_blocked_encode_with_version(
                 let start = base;
                 base += chunk.len();
                 s.spawn(move || {
-                    let mut head = vec![-1i32; LZV2_HASH_SIZE];
-                    let mut prev = vec![0i32; window_size];
+                    let mut head = vec![T::SENTINEL; LZV2_HASH_SIZE];
+                    let mut prev = vec![T::SENTINEL; window_size];
                     for (j, slot) in chunk.iter_mut().enumerate() {
                         let b = start + j;
                         let block_start = b * block_size;
                         let block_end = std::cmp::min(block_start + block_size, n);
                         let block = &data[block_start..block_end];
-                        head.fill(-1);
+                        head.fill(T::SENTINEL);
                         let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, window_size, version);
                         let res = encode_block_result(block, c_opt);
                         slot.write(res);
@@ -1761,7 +1827,6 @@ pub enum CompressMethod {
 }
 
 impl CompressMethod {
-    /// Stable on-disk identifier for the method.
     pub fn to_u8(self) -> u8 {
         match self {
             CompressMethod::Plain => 0,
@@ -1772,9 +1837,7 @@ impl CompressMethod {
             CompressMethod::Shuffle2Blk => 5,
         }
     }
-
-    /// Parse a method from its on-disk identifier.
-    pub fn from_u8(v: u8) -> Option<CompressMethod> {
+    pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(CompressMethod::Plain),
             1 => Some(CompressMethod::Blocked),
@@ -1803,7 +1866,7 @@ fn estimate_entropy(data: &[u8]) -> f64 {
 }
 
 pub fn smart_compress(data: &[u8]) -> Option<(Vec<u8>, CompressMethod)> {
-    smart_compress_with_version(data, 65536, 32768, 2)
+    smart_compress_with_version(data, 65536, 128 * 1024, 2)
 }
 
 pub fn smart_compress_with_version(
@@ -1829,12 +1892,9 @@ pub fn smart_compress_with_version(
         }
     };
 
-    // Above this size, the single-threaded non-blocked passes become the bottleneck
-    // while being ratio-equivalent to their blocked counterparts, so we skip them.
     const PARALLEL_ONLY_THRESHOLD: usize = 1 << 20; // 1 MB
 
     if n >= PARALLEL_ONLY_THRESHOLD {
-        // Large files: only internally-parallel blocked variants (fast + per-block trees).
         let mut block_cand = None;
         let mut shuf_blk_cand = None;
         let mut shuf2_blk_cand = None;
@@ -1867,8 +1927,6 @@ pub fn smart_compress_with_version(
         consider(shuf_blk_cand, CompressMethod::ShuffleBlk, &mut best);
         consider(shuf2_blk_cand, CompressMethod::Shuffle2Blk, &mut best);
     } else {
-        // Small/medium files: cheap single-threaded passes over candidate transforms,
-        // plus blocked variants when the data spans more than one block.
         let mut plain_cand = None;
         let mut shuf_cand = None;
         let mut shuf2_cand = None;
@@ -2227,13 +2285,8 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                         *current_idx
                     };
 
-                    let block_size = if !block_headers.is_empty() {
-                        block_headers[0].1.max(1)
-                    } else {
-                        32768
-                    };
-                    let b_idx = source_idx / block_size;
-                    let offset_in_block = source_idx % block_size;
+                    let b_idx = source_idx / BLOCK_SIZE;
+                    let offset_in_block = source_idx % BLOCK_SIZE;
 
                     let s_cache = if *current_idx < *stride * *groups {
                         *current_idx % *stride
@@ -2400,13 +2453,13 @@ mod tests {
         }
 
         // Roundtrip version 1
-        if let Some((comp1, method1)) = smart_compress_with_version(&data, 65536, 32768, 1) {
+        if let Some((comp1, method1)) = smart_compress_with_version(&data, 65536, 131072, 1) {
             let decomp1 = smart_decompress_with_version(&comp1, method1, data.len(), 1).unwrap();
             assert_eq!(decomp1, data);
         }
 
         // Roundtrip version 2
-        if let Some((comp2, method2)) = smart_compress_with_version(&data, 65536, 32768, 2) {
+        if let Some((comp2, method2)) = smart_compress_with_version(&data, 65536, 131072, 2) {
             let decomp2 = smart_decompress_with_version(&comp2, method2, data.len(), 2).unwrap();
             assert_eq!(decomp2, data);
         }
