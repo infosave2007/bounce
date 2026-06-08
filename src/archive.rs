@@ -339,7 +339,7 @@ fn compress_stream_blocked<R: Read, W: Write, T: codec::TableIndex>(
                     let mut prev = vec![T::SENTINEL; window_size];
                     let mut buffers = codec::CompressBuffers::new();
                     let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version);
-                    codec::encode_block_result(block, c_opt)
+                    codec::encode_block_result(block, c_opt, 0, format_version)
                 }));
             }
             handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
@@ -380,8 +380,8 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
 
     // Buffer for each lane before compression
     let mut lane_buffers = vec![Vec::new(); stride];
-    // Buffered compressed blocks for each lane
-    let mut compressed_blocks = vec![Vec::new(); stride];
+    // Buffered compressed blocks for each lane removed to avoid OOM
+    // Blocks will be streamed to disk
 
     let concurrency = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let batch_multiplier = concurrency * 4;
@@ -421,6 +421,9 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
                 let num_groups = limit / stride;
                 for g in 0..num_groups {
                     for s in 0..stride {
+                        if format_version >= 3 && lane_buffers[s].len() % block_size == 0 {
+                            prev_byte[s] = 0;
+                        }
                         let b = chunk[i + g * stride + s];
                         let delta = b.wrapping_sub(prev_byte[s]);
                         lane_buffers[s].push(delta);
@@ -452,16 +455,17 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
                         let mut prev = vec![T::SENTINEL; window_size];
                         let mut buffers = codec::CompressBuffers::new();
                         let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version);
-                        let res = codec::encode_block_result(block, c_opt);
+                        let res = codec::encode_block_result(block, c_opt, *lane, format_version);
                         (*lane, res)
                     }));
                 }
                 handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
             });
 
-            for (lane, res) in compressed_batch {
+            for (_lane, res) in compressed_batch {
                 stored_size += res.len() as u64;
-                compressed_blocks[lane].push(res);
+                w.write_all(&res)?;
+                *num_blocks += 1;
             }
         }
 
@@ -487,16 +491,16 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
                     let mut prev = vec![T::SENTINEL; window_size];
                     let mut buffers = codec::CompressBuffers::new();
                     let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version);
-                    let res = codec::encode_block_result(block, c_opt);
+                    let res = codec::encode_block_result(block, c_opt, *lane, format_version);
                     (*lane, res)
                 }));
             }
             handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
         });
 
-        for (lane, res) in final_batch {
-            stored_size += res.len() as u64;
-            compressed_blocks[lane].push(res);
+        for (_lane, res) in final_batch {
+            w.write_all(&res)?;
+            *num_blocks += 1;
         }
     }
 
@@ -504,13 +508,7 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
         eprint!("\r\x1b[K"); // Clear the line when done
     }
 
-    // Write compressed blocks in lane order
-    for s in 0..stride {
-        for block_res in &compressed_blocks[s] {
-            w.write_all(block_res)?;
-            *num_blocks += 1;
-        }
-    }
+    // Blocks are already written to disk.
     *orig_size = file_size;
     Ok(())
 }
@@ -538,7 +536,7 @@ pub fn create(
         ));
     }
 
-    let format_version = if level == 1 { 1 } else { 2 };
+    let format_version = 4;
     let window_size = if level == 1 {
         65536
     } else {
@@ -892,7 +890,7 @@ fn open_archive(archive_path: &str) -> io::Result<(BufReader<fs::File>, u32, u8)
     }
     let mut ver = [0u8; 1];
     r.read_exact(&mut ver)?;
-    if ver[0] != 1 && ver[0] != 2 {
+    if ver[0] < 1 || ver[0] > 4 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unsupported archive version {}", ver[0]),

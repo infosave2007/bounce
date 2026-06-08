@@ -1485,21 +1485,24 @@ where
     }
 }
 
-pub(crate) fn encode_block_result(block: &[u8], c_opt: Option<Vec<u8>>) -> Vec<u8> {
+pub(crate) fn encode_block_result(block: &[u8], c_opt: Option<Vec<u8>>, lane: usize, version: u8) -> Vec<u8> {
+    let header_size = if version >= 4 { 10 } else { 9 };
     match c_opt {
         Some(c) if c.len() < block.len() => {
-            let mut v = Vec::with_capacity(c.len() + 9);
+            let mut v = Vec::with_capacity(c.len() + header_size);
             v.extend_from_slice(&(c.len() as u32).to_le_bytes());
             v.extend_from_slice(&(block.len() as u32).to_le_bytes());
             v.push(1); // compressed flag
+            if version >= 4 { v.push(lane as u8); }
             v.extend_from_slice(&c);
             v
         }
         _ => {
-            let mut v = Vec::with_capacity(block.len() + 9);
+            let mut v = Vec::with_capacity(block.len() + header_size);
             v.extend_from_slice(&(block.len() as u32).to_le_bytes());
             v.extend_from_slice(&(block.len() as u32).to_le_bytes());
             v.push(0); // raw flag
+            if version >= 4 { v.push(lane as u8); }
             v.extend_from_slice(block);
             v
         }
@@ -1552,7 +1555,7 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
             let block = &data[start..end];
             // head.fill(T::SENTINEL);
             let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version);
-            let res = encode_block_result(block, c_opt);
+            let res = encode_block_result(block, c_opt, 0, version);
             encoded_blocks[b].write(res);
         }
     } else {
@@ -1573,7 +1576,7 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
                         let block = &data[block_start..block_end];
                         // head.fill(T::SENTINEL);
                         let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version);
-                        let res = encode_block_result(block, c_opt);
+                        let res = encode_block_result(block, c_opt, 0, version);
                         slot.write(res);
                     }
                 });
@@ -2120,19 +2123,21 @@ pub enum DecompressState {
         current_block: usize,
         block_offsets: Vec<u64>,
         block_headers: Vec<(usize, usize, u8)>, // (comp_size, orig_size, flag)
-        buffer: Vec<u8>,
+        buffer: Vec<Vec<u8>>,
+        buf_idx: usize,
         buf_pos: usize,
-        comp_buf: Vec<u8>,
     },
     ShuffleBlocked {
         stride: usize,
         groups: usize,
         prev_byte: [u8; 4],
-        active_blocks: Vec<Option<(usize, Vec<u8>)>>, // (block_index, block_data)
-        block_offsets: Vec<u64>,
-        block_headers: Vec<(usize, usize, u8)>,
-        comp_buf: Vec<u8>,
+        active_blocks: Vec<std::collections::VecDeque<Vec<u8>>>,
+        active_blocks_idx: Vec<usize>, // Index for the next block to fetch for each lane
+        block_offsets: Vec<Vec<u64>>,
+        block_headers: Vec<Vec<(usize, usize, u8)>>,
         current_idx: usize,
+        buffer: Vec<u8>,
+        buf_pos: usize,
     },
 }
 
@@ -2202,7 +2207,8 @@ impl<R: Read + Seek> DecompressReader<R> {
                 let start_pos = self.inner.stream_position()?;
                 let mut curr_pos = start_pos;
 
-                let mut header_buf = [0u8; 9];
+                let header_size = if self.version >= 4 { 10 } else { 9 };
+                let mut header_buf = vec![0u8; header_size];
                 for _ in 0..num_blocks {
                     block_offsets.push(curr_pos);
                     self.inner.read_exact(&mut header_buf)?;
@@ -2212,7 +2218,7 @@ impl<R: Read + Seek> DecompressReader<R> {
 
                     block_headers.push((comp_size, orig_size, flag));
                     self.inner.seek(SeekFrom::Current(comp_size as i64))?;
-                    curr_pos += 9 + comp_size as u64;
+                    curr_pos += header_size as u64 + comp_size as u64;
                 }
 
                 self.state = DecompressState::Blocked {
@@ -2221,8 +2227,8 @@ impl<R: Read + Seek> DecompressReader<R> {
                     block_offsets,
                     block_headers,
                     buffer: Vec::new(),
+                    buf_idx: 0,
                     buf_pos: 0,
-                    comp_buf: Vec::new(),
                 };
             }
             CompressMethod::ShuffleBlk | CompressMethod::Shuffle2Blk => {
@@ -2230,37 +2236,51 @@ impl<R: Read + Seek> DecompressReader<R> {
                 self.inner.read_exact(&mut num_blocks_bytes)?;
                 let num_blocks = u32::from_le_bytes(num_blocks_bytes) as usize;
 
-                let mut block_offsets = Vec::with_capacity(num_blocks);
-                let mut block_headers = Vec::with_capacity(num_blocks);
+                let stride = if self.method == CompressMethod::ShuffleBlk { 4 } else { 2 };
+                let groups = (self.orig_size as usize) / stride;
+
+                let mut block_offsets = vec![Vec::new(); stride];
+                let mut block_headers = vec![Vec::new(); stride];
 
                 let start_pos = self.inner.stream_position()?;
                 let mut curr_pos = start_pos;
 
-                let mut header_buf = [0u8; 9];
-                for _ in 0..num_blocks {
-                    block_offsets.push(curr_pos);
+                let header_size = if self.version >= 4 { 10 } else { 9 };
+                let mut header_buf = vec![0u8; header_size];
+
+                for i in 0..num_blocks {
                     self.inner.read_exact(&mut header_buf)?;
                     let comp_size = u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]]) as usize;
                     let orig_size = u32::from_le_bytes([header_buf[4], header_buf[5], header_buf[6], header_buf[7]]) as usize;
                     let flag = header_buf[8];
 
-                    block_headers.push((comp_size, orig_size, flag));
+                    let lane_id = if self.version >= 4 {
+                        header_buf[9] as usize
+                    } else {
+                        i / (num_blocks / stride)
+                    };
+                    
+                    let lane_id = std::cmp::min(lane_id, stride - 1); // safe fallback for remainder blocks
+
+                    block_offsets[lane_id].push(curr_pos);
+                    block_headers[lane_id].push((comp_size, orig_size, flag));
                     self.inner.seek(SeekFrom::Current(comp_size as i64))?;
-                    curr_pos += 9 + comp_size as u64;
+                    curr_pos += header_size as u64 + comp_size as u64;
                 }
 
-                let stride = if self.method == CompressMethod::ShuffleBlk { 4 } else { 2 };
-                let groups = (self.orig_size as usize) / stride;
+                let active_blocks_idx = vec![0; stride];
 
                 self.state = DecompressState::ShuffleBlocked {
                     stride,
                     groups,
                     prev_byte: [0u8; 4],
-                    active_blocks: vec![None; stride],
+                    active_blocks: vec![std::collections::VecDeque::new(); stride],
+                    active_blocks_idx,
                     block_offsets,
                     block_headers,
-                    comp_buf: Vec::new(),
                     current_idx: 0,
+                    buffer: Vec::new(),
+                    buf_pos: 0,
                 };
             }
         }
@@ -2299,37 +2319,66 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                 block_offsets,
                 block_headers,
                 buffer,
+                buf_idx,
                 buf_pos,
-                comp_buf,
             } => {
-                if *buf_pos >= buffer.len() {
+                if *buf_idx >= buffer.len() {
                     if *current_block >= *num_blocks {
                         return Ok(0);
                     }
-                    let (comp_size, orig_size, flag) = block_headers[*current_block];
-                    let offset = block_offsets[*current_block];
                     
-                    self.inner.seek(SeekFrom::Start(offset + 9))?;
-                    if comp_buf.len() < comp_size {
-                        comp_buf.resize(comp_size, 0);
+                    let concurrency = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+                    let batch_size = concurrency * 4;
+                    let to_fetch = std::cmp::min(batch_size, *num_blocks - *current_block);
+                    
+                    let mut batch_comp = Vec::with_capacity(to_fetch);
+                    for i in 0..to_fetch {
+                        let idx = *current_block + i;
+                        let offset = block_offsets[idx];
+                        let (comp_size, orig_size, flag) = block_headers[idx];
+                        let header_size = if self.version >= 4 { 10 } else { 9 };
+                        self.inner.seek(SeekFrom::Start(offset + header_size as u64))?;
+                        let mut comp_buf = vec![0u8; comp_size];
+                        self.inner.read_exact(&mut comp_buf)?;
+                        batch_comp.push((comp_buf, orig_size, flag));
                     }
-                    self.inner.read_exact(&mut comp_buf[..comp_size])?;
-
-                    let decoded_block = if flag == 1 {
-                        deflate_style_decode_with_version(&comp_buf[..comp_size], orig_size, self.version)
-                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-                    } else {
-                        comp_buf[..comp_size].to_vec()
-                    };
-
-                    *buffer = decoded_block;
+                    
+                    let version = self.version;
+                    let decomp_batch = std::thread::scope(|s| {
+                        let mut handles = Vec::with_capacity(to_fetch);
+                        for (comp, orig_size, flag) in batch_comp {
+                            handles.push(s.spawn(move || {
+                                if flag == 1 {
+                                    deflate_style_decode_with_version(&comp, orig_size, version)
+                                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+                                } else {
+                                    Ok(comp)
+                                }
+                            }));
+                        }
+                        let mut results = Vec::with_capacity(to_fetch);
+                        for h in handles {
+                            results.push(h.join().unwrap()?);
+                        }
+                        Ok::<Vec<Vec<u8>>, io::Error>(results)
+                    })?;
+                    
+                    *buffer = decomp_batch;
+                    *buf_idx = 0;
                     *buf_pos = 0;
-                    *current_block += 1;
+                    *current_block += to_fetch;
                 }
-
-                let to_copy = std::cmp::min(buffer.len() - *buf_pos, buf.len());
-                buf[..to_copy].copy_from_slice(&buffer[*buf_pos..*buf_pos + to_copy]);
+                
+                let current_buf = &buffer[*buf_idx];
+                let to_copy = std::cmp::min(current_buf.len() - *buf_pos, buf.len());
+                buf[..to_copy].copy_from_slice(&current_buf[*buf_pos..*buf_pos + to_copy]);
                 *buf_pos += to_copy;
+                
+                if *buf_pos >= current_buf.len() {
+                    *buf_idx += 1;
+                    *buf_pos = 0;
+                }
+                
                 Ok(to_copy)
             }
             DecompressState::ShuffleBlocked {
@@ -2337,76 +2386,154 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                 groups,
                 prev_byte,
                 active_blocks,
+                active_blocks_idx,
                 block_offsets,
                 block_headers,
-                comp_buf,
                 current_idx,
+                buffer,
+                buf_pos,
             } => {
                 let orig_size_usize = self.orig_size as usize;
-                if *current_idx >= orig_size_usize {
-                    return Ok(0);
-                }
-
-                let mut written = 0;
-                while written < buf.len() && *current_idx < orig_size_usize {
-                    let source_idx = if *current_idx < *stride * *groups {
-                        let g = *current_idx / *stride;
-                        let s = *current_idx % *stride;
-                        s * *groups + g
-                    } else {
-                        *current_idx
-                    };
-
-                    let b_idx = source_idx / BLOCK_SIZE;
-                    let offset_in_block = source_idx % BLOCK_SIZE;
-
-                    let s_cache = if *current_idx < *stride * *groups {
-                        *current_idx % *stride
-                    } else {
-                        0
-                    };
-
-                    let cached_valid = match &active_blocks[s_cache] {
-                        Some((cached_b, _)) => *cached_b == b_idx,
-                        None => false,
-                    };
-
-                    if !cached_valid {
-                        let (comp_size, orig_size, flag) = block_headers[b_idx];
-                        let offset = block_offsets[b_idx];
+                
+                if *buf_pos >= buffer.len() {
+                    if *current_idx >= orig_size_usize {
+                        return Ok(0);
+                    }
+                    
+                    if active_blocks[0].is_empty() {
+                        let concurrency = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+                        let blocks_per_lane = concurrency * 2;
                         
-                        self.inner.seek(SeekFrom::Start(offset + 9))?;
-                        if comp_buf.len() < comp_size {
-                            comp_buf.resize(comp_size, 0);
+                        let mut batch_comp = Vec::new();
+                        for s in 0..*stride {
+                            let mut to_fetch = blocks_per_lane;
+                            let limit = block_offsets[s].len();
+                            if active_blocks_idx[s] + to_fetch > limit {
+                                to_fetch = limit - active_blocks_idx[s];
+                            }
+                            
+                            let header_size = if self.version >= 4 { 10 } else { 9 };
+                            for i in 0..to_fetch {
+                                let idx = active_blocks_idx[s] + i;
+                                let offset = block_offsets[s][idx];
+                                let (comp_size, orig_size, flag) = block_headers[s][idx];
+                                self.inner.seek(SeekFrom::Start(offset + header_size as u64))?;
+                                let mut comp_buf = vec![0u8; comp_size];
+                                self.inner.read_exact(&mut comp_buf)?;
+                                batch_comp.push((s, comp_buf, orig_size, flag));
+                            }
+                            active_blocks_idx[s] += to_fetch;
                         }
-                        self.inner.read_exact(&mut comp_buf[..comp_size])?;
-
-                        let decoded_block = if flag == 1 {
-                            deflate_style_decode_with_version(&comp_buf[..comp_size], orig_size, self.version)
-                                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-                        } else {
-                            comp_buf[..comp_size].to_vec()
-                        };
-
-                        active_blocks[s_cache] = Some((b_idx, decoded_block));
+                        
+                        if !batch_comp.is_empty() {
+                            let version = self.version;
+                            let decomp_batch = std::thread::scope(|scope| {
+                                let mut handles = Vec::with_capacity(batch_comp.len());
+                                for (s, comp, orig_size, flag) in batch_comp {
+                                    handles.push(scope.spawn(move || {
+                                        let mut decoded = if flag == 1 {
+                                            deflate_style_decode_with_version(&comp, orig_size, version)
+                                                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                                        } else {
+                                            comp
+                                        };
+                                        
+                                        if version >= 3 {
+                                            let mut p = 0u8;
+                                            for i in 0..decoded.len() {
+                                                let val = decoded[i].wrapping_add(p);
+                                                decoded[i] = val;
+                                                p = val;
+                                            }
+                                        }
+                                        
+                                        Ok::<_, io::Error>((s, decoded))
+                                    }));
+                                }
+                                let mut results = Vec::with_capacity(handles.len());
+                                for h in handles {
+                                    results.push(h.join().unwrap()?);
+                                }
+                                Ok::<_, io::Error>(results)
+                            })?;
+                            
+                            for (s, decoded) in decomp_batch {
+                                active_blocks[s].push_back(decoded);
+                            }
+                        }
                     }
 
-                    let block_data = &active_blocks[s_cache].as_ref().unwrap().1;
-                    let val = if *current_idx < *stride * *groups {
-                        let byte = block_data[offset_in_block];
-                        let val = byte.wrapping_add(prev_byte[s_cache]);
-                        prev_byte[s_cache] = val;
-                        val
+                    if *current_idx < *stride * *groups {
+                        let g_start = *current_idx / *stride;
+                        let offset_start = g_start % BLOCK_SIZE;
+                        let remaining_in_block = BLOCK_SIZE - offset_start;
+                        
+                        let groups_left = *groups - g_start;
+                        let groups_to_process = std::cmp::min(remaining_in_block, groups_left);
+                        
+                        buffer.resize(groups_to_process * *stride, 0);
+                        
+                        let mut block_slices = Vec::with_capacity(*stride);
+                        for s in 0..*stride {
+                            block_slices.push(active_blocks[s].front().unwrap().as_slice());
+                        }
+                        
+                        for g_offset in 0..groups_to_process {
+                            let offset_in_block = offset_start + g_offset;
+                            if self.version >= 3 {
+                                for s in 0..*stride {
+                                    let val = unsafe { *block_slices.get_unchecked(s).get_unchecked(offset_in_block) };
+                                    unsafe { *buffer.get_unchecked_mut(g_offset * *stride + s) = val; }
+                                }
+                            } else {
+                                for s in 0..*stride {
+                                    let delta = unsafe { *block_slices.get_unchecked(s).get_unchecked(offset_in_block) };
+                                    let val = delta.wrapping_add(prev_byte[s]);
+                                    prev_byte[s] = val;
+                                    unsafe { *buffer.get_unchecked_mut(g_offset * *stride + s) = val; }
+                                }
+                            }
+                        }
+                        
+                        *current_idx += groups_to_process * *stride;
+                        *buf_pos = 0;
+                        
+                        let g_end = *current_idx / *stride;
+                        if g_end % BLOCK_SIZE == 0 || g_end == *groups {
+                            for s in 0..*stride {
+                                active_blocks[s].pop_front();
+                            }
+                        }
                     } else {
-                        block_data[offset_in_block]
-                    };
-
-                    buf[written] = val;
-                    written += 1;
-                    *current_idx += 1;
+                        // Remainder bytes
+                        let remaining_bytes = orig_size_usize - *current_idx;
+                        let offset_start = *current_idx % BLOCK_SIZE;
+                        let remaining_in_block = BLOCK_SIZE - offset_start;
+                        let to_process = std::cmp::min(remaining_bytes, remaining_in_block);
+                        
+                        buffer.resize(to_process, 0);
+                        
+                        let block_slice = active_blocks[*stride - 1].front().unwrap().as_slice();
+                        for i in 0..to_process {
+                            let offset_in_block = offset_start + i;
+                            let b = unsafe { *block_slice.get_unchecked(offset_in_block) };
+                            unsafe { *buffer.get_unchecked_mut(i) = b; }
+                        }
+                        
+                        *current_idx += to_process;
+                        *buf_pos = 0;
+                        
+                        if (*current_idx % BLOCK_SIZE == 0) || (*current_idx == orig_size_usize) {
+                            active_blocks[*stride - 1].pop_front();
+                        }
+                    }
                 }
 
-                Ok(written)
+                let to_copy = std::cmp::min(buffer.len() - *buf_pos, buf.len());
+                buf[..to_copy].copy_from_slice(&buffer[*buf_pos..*buf_pos + to_copy]);
+                *buf_pos += to_copy;
+                
+                Ok(to_copy)
             }
         }
     }
