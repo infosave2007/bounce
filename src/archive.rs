@@ -253,14 +253,14 @@ fn print_progress(
     let ratio = if bytes_processed == 0 { 0.0 } else { stored_size as f64 / bytes_processed as f64 * 100.0 };
     
     eprint!(
-        "\r\x1b[K  [{}] compressing {}: {:.1} / {:.1} MB ({:.1}%) | {:.1} MB/s | Ratio: {:.1}%",
-        format_duration(eta_secs),
+        "\r\x1b[K  compressing {}: {:.1} / {:.1} MB ({:.1}%) | {:.1} MB/s | Ratio: {:.1}% | ETA: {}",
         file_name,
         bytes_processed as f64 / 1_048_576.0,
         file_size as f64 / 1_048_576.0,
         pct,
         speed_mb,
-        ratio
+        ratio,
+        format_duration(eta_secs)
     );
     let _ = std::io::stderr().flush();
 }
@@ -536,7 +536,7 @@ pub fn create(
         ));
     }
 
-    let format_version = 4;
+    let format_version = 1;
     let window_size = if level == 1 {
         65536
     } else {
@@ -890,7 +890,7 @@ fn open_archive(archive_path: &str) -> io::Result<(BufReader<fs::File>, u32, u8)
     }
     let mut ver = [0u8; 1];
     r.read_exact(&mut ver)?;
-    if ver[0] < 1 || ver[0] > 4 {
+    if ver[0] != 1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unsupported archive version {}", ver[0]),

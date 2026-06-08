@@ -1485,15 +1485,15 @@ where
     }
 }
 
-pub(crate) fn encode_block_result(block: &[u8], c_opt: Option<Vec<u8>>, lane: usize, version: u8) -> Vec<u8> {
-    let header_size = if version >= 4 { 10 } else { 9 };
+pub(crate) fn encode_block_result(block: &[u8], c_opt: Option<Vec<u8>>, lane: usize, _version: u8) -> Vec<u8> {
+    let header_size = 10;
     match c_opt {
         Some(c) if c.len() < block.len() => {
             let mut v = Vec::with_capacity(c.len() + header_size);
             v.extend_from_slice(&(c.len() as u32).to_le_bytes());
             v.extend_from_slice(&(block.len() as u32).to_le_bytes());
             v.push(1); // compressed flag
-            if version >= 4 { v.push(lane as u8); }
+            v.push(lane as u8);
             v.extend_from_slice(&c);
             v
         }
@@ -1502,7 +1502,7 @@ pub(crate) fn encode_block_result(block: &[u8], c_opt: Option<Vec<u8>>, lane: us
             v.extend_from_slice(&(block.len() as u32).to_le_bytes());
             v.extend_from_slice(&(block.len() as u32).to_le_bytes());
             v.push(0); // raw flag
-            if version >= 4 { v.push(lane as u8); }
+            v.push(lane as u8);
             v.extend_from_slice(block);
             v
         }
@@ -2207,7 +2207,7 @@ impl<R: Read + Seek> DecompressReader<R> {
                 let start_pos = self.inner.stream_position()?;
                 let mut curr_pos = start_pos;
 
-                let header_size = if self.version >= 4 { 10 } else { 9 };
+                let header_size = 10;
                 let mut header_buf = vec![0u8; header_size];
                 for _ in 0..num_blocks {
                     block_offsets.push(curr_pos);
@@ -2245,7 +2245,7 @@ impl<R: Read + Seek> DecompressReader<R> {
                 let start_pos = self.inner.stream_position()?;
                 let mut curr_pos = start_pos;
 
-                let header_size = if self.version >= 4 { 10 } else { 9 };
+                let header_size = 10;
                 let mut header_buf = vec![0u8; header_size];
 
                 for i in 0..num_blocks {
@@ -2254,11 +2254,7 @@ impl<R: Read + Seek> DecompressReader<R> {
                     let orig_size = u32::from_le_bytes([header_buf[4], header_buf[5], header_buf[6], header_buf[7]]) as usize;
                     let flag = header_buf[8];
 
-                    let lane_id = if self.version >= 4 {
-                        header_buf[9] as usize
-                    } else {
-                        i / (num_blocks / stride)
-                    };
+                    let lane_id = header_buf[9] as usize;
                     
                     let lane_id = std::cmp::min(lane_id, stride - 1); // safe fallback for remainder blocks
 
@@ -2336,7 +2332,7 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                         let idx = *current_block + i;
                         let offset = block_offsets[idx];
                         let (comp_size, orig_size, flag) = block_headers[idx];
-                        let header_size = if self.version >= 4 { 10 } else { 9 };
+                        let header_size = 10;
                         self.inner.seek(SeekFrom::Start(offset + header_size as u64))?;
                         let mut comp_buf = vec![0u8; comp_size];
                         self.inner.read_exact(&mut comp_buf)?;
@@ -2412,7 +2408,7 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                                 to_fetch = limit - active_blocks_idx[s];
                             }
                             
-                            let header_size = if self.version >= 4 { 10 } else { 9 };
+                            let header_size = 10;
                             for i in 0..to_fetch {
                                 let idx = active_blocks_idx[s] + i;
                                 let offset = block_offsets[s][idx];
