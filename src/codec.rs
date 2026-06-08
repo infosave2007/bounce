@@ -715,6 +715,16 @@ fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
                     if limit > LZV2_MAX_MATCH {
                         limit = LZV2_MAX_MATCH;
                     }
+                    while l + 8 <= limit {
+                        let a = unsafe { std::ptr::read_unaligned(data.as_ptr().add(p + l) as *const u64) };
+                        let b = unsafe { std::ptr::read_unaligned(data.as_ptr().add(i + l) as *const u64) };
+                        if a != b {
+                            let diff = a ^ b;
+                            l += (diff.trailing_zeros() / 8) as usize;
+                            break;
+                        }
+                        l += 8;
+                    }
                     while l < limit && data[p + l] == data[i + l] {
                         l += 1;
                     }
@@ -745,6 +755,16 @@ fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
                         let mut limit = n - (i + 1);
                         if limit > LZV2_MAX_MATCH {
                             limit = LZV2_MAX_MATCH;
+                        }
+                        while l + 8 <= limit {
+                            let a = unsafe { std::ptr::read_unaligned(data.as_ptr().add(p + l) as *const u64) };
+                            let b = unsafe { std::ptr::read_unaligned(data.as_ptr().add(i + 1 + l) as *const u64) };
+                            if a != b {
+                                let diff = a ^ b;
+                                l += (diff.trailing_zeros() / 8) as usize;
+                                break;
+                            }
+                            l += 8;
                         }
                         while l < limit && data[p + l] == data[i + 1 + l] {
                             l += 1;
@@ -1150,6 +1170,13 @@ fn byte_shuffle(data: &[u8], stride: usize) -> Vec<u8> {
         for (g, dst) in lane.iter_mut().enumerate() {
             *dst = data[g * stride + s];
         }
+        // Apply delta encoding in-place
+        let mut prev = 0u8;
+        for val in lane.iter_mut() {
+            let curr = *val;
+            *val = curr.wrapping_sub(prev);
+            prev = curr;
+        }
     }
     // Remainder bytes
     if n > groups * stride {
@@ -1164,8 +1191,10 @@ fn byte_unshuffle(data: &[u8], stride: usize) -> Vec<u8> {
     let mut out = vec![0u8; n];
     for s in 0..stride {
         let lane = &data[s * groups..(s + 1) * groups];
-        for (g, &src) in lane.iter().enumerate() {
-            out[g * stride + s] = src;
+        let mut accum = 0u8;
+        for (g, &val) in lane.iter().enumerate() {
+            accum = accum.wrapping_add(val);
+            out[g * stride + s] = accum;
         }
     }
     // Remainder bytes
