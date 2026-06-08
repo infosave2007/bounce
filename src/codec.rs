@@ -1736,19 +1736,41 @@ impl CompressMethod {
     }
 }
 
+fn estimate_entropy(data: &[u8]) -> f64 {
+    let mut freq = [0u32; 256];
+    for &b in data {
+        freq[b as usize] += 1;
+    }
+    let n = data.len() as f64;
+    freq.iter()
+        .filter(|&&f| f > 0)
+        .map(|&f| {
+            let p = f as f64 / n;
+            -p * p.log2()
+        })
+        .sum()
+}
+
 pub fn smart_compress(data: &[u8]) -> Option<(Vec<u8>, CompressMethod)> {
     let n = data.len();
     if n < 128 {
         return None;
     }
 
+    let skip_shuffle = estimate_entropy(data) > 7.5;
     let mut best: Option<(Vec<u8>, CompressMethod)> = None;
-    let consider = |cand: Option<Vec<u8>>, m: CompressMethod, best: &mut Option<(Vec<u8>, CompressMethod)>| {
+
+    let consider = |cand: Option<Vec<u8>>, m: CompressMethod, best: &mut Option<(Vec<u8>, CompressMethod)>| -> bool {
         if let Some(c) = cand {
-            if best.is_none() || c.len() < best.as_ref().unwrap().0.len() {
+            let len = c.len();
+            if best.is_none() || len < best.as_ref().unwrap().0.len() {
                 *best = Some((c, m));
             }
+            if len * 5 < n {
+                return true;
+            }
         }
+        false
     };
 
     // Above this size, the single-threaded non-blocked passes become the bottleneck
@@ -1757,29 +1779,54 @@ pub fn smart_compress(data: &[u8]) -> Option<(Vec<u8>, CompressMethod)> {
 
     if n >= PARALLEL_ONLY_THRESHOLD {
         // Large files: only internally-parallel blocked variants (fast + per-block trees).
-        consider(deflate_blocked_encode(data), CompressMethod::Blocked, &mut best);
+        if consider(deflate_blocked_encode(data), CompressMethod::Blocked, &mut best) {
+            return best;
+        }
 
-        let shuffled4 = byte_shuffle(data, 4);
-        consider(deflate_blocked_encode(&shuffled4), CompressMethod::ShuffleBlk, &mut best);
-        drop(shuffled4);
+        if !skip_shuffle {
+            let shuffled4 = byte_shuffle(data, 4);
+            let done = consider(deflate_blocked_encode(&shuffled4), CompressMethod::ShuffleBlk, &mut best);
+            drop(shuffled4);
+            if done {
+                return best;
+            }
 
-        let shuffled2 = byte_shuffle(data, 2);
-        consider(deflate_blocked_encode(&shuffled2), CompressMethod::Shuffle2Blk, &mut best);
+            let shuffled2 = byte_shuffle(data, 2);
+            consider(deflate_blocked_encode(&shuffled2), CompressMethod::Shuffle2Blk, &mut best);
+        }
     } else {
         // Small/medium files: cheap single-threaded passes over candidate transforms,
         // plus blocked variants when the data spans more than one block.
-        consider(deflate_style_encode(data), CompressMethod::Plain, &mut best);
+        if consider(deflate_style_encode(data), CompressMethod::Plain, &mut best) {
+            return best;
+        }
 
-        let shuffled4 = byte_shuffle(data, 4);
-        consider(deflate_style_encode(&shuffled4), CompressMethod::Shuffle, &mut best);
+        if !skip_shuffle {
+            let shuffled4 = byte_shuffle(data, 4);
+            let done = consider(deflate_style_encode(&shuffled4), CompressMethod::Shuffle, &mut best);
+            if done {
+                return best;
+            }
 
-        let shuffled2 = byte_shuffle(data, 2);
-        consider(deflate_style_encode(&shuffled2), CompressMethod::Shuffle2, &mut best);
+            let shuffled2 = byte_shuffle(data, 2);
+            let done = consider(deflate_style_encode(&shuffled2), CompressMethod::Shuffle2, &mut best);
+            if done {
+                return best;
+            }
 
-        if n >= BLOCK_SIZE {
+            if n >= BLOCK_SIZE {
+                if consider(deflate_blocked_encode(data), CompressMethod::Blocked, &mut best) {
+                    return best;
+                }
+                let done = consider(deflate_blocked_encode(&shuffled4), CompressMethod::ShuffleBlk, &mut best);
+                drop(shuffled4);
+                if done {
+                    return best;
+                }
+                consider(deflate_blocked_encode(&shuffled2), CompressMethod::Shuffle2Blk, &mut best);
+            }
+        } else if n >= BLOCK_SIZE {
             consider(deflate_blocked_encode(data), CompressMethod::Blocked, &mut best);
-            consider(deflate_blocked_encode(&shuffled4), CompressMethod::ShuffleBlk, &mut best);
-            consider(deflate_blocked_encode(&shuffled2), CompressMethod::Shuffle2Blk, &mut best);
         }
     }
 
@@ -2174,5 +2221,22 @@ mod tests {
         let weights: Vec<f32> = (0..10_000).map(|i| (i as f32) * 0.001).collect();
         let bytes = unsafe { std::slice::from_raw_parts(weights.as_ptr() as *const u8, weights.len() * 4) };
         roundtrip(bytes);
+    }
+
+    #[test]
+    fn test_entropy_screening_and_early_exit() {
+        let mut rng_data = vec![0u8; 2000];
+        for i in 0..2000 {
+            rng_data[i] = ((i * 127 + 33) % 256) as u8;
+        }
+        let entropy = estimate_entropy(&rng_data);
+        assert!(entropy > 7.5, "Expected high entropy, got {}", entropy);
+
+        let compressible_data = vec![0u8; 10_000];
+        let entropy_comp = estimate_entropy(&compressible_data);
+        assert!(entropy_comp < 1.0, "Expected low entropy, got {}", entropy_comp);
+
+        roundtrip(&rng_data);
+        roundtrip(&compressible_data);
     }
 }
