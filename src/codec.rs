@@ -315,11 +315,17 @@ fn huff_assign_lengths(
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct TableEntry {
-    sym: u16,
-    bits: u8,
+#[inline(always)]
+fn pack_table_entry(sym: u16, bits: u8) -> u16 {
+    ((bits as u16) << 9) | sym
 }
+
+#[inline(always)]
+fn unpack_table_entry(entry: u16) -> (u16, u8) {
+    (entry & 0x1FF, (entry >> 9) as u8)
+}
+
+const SUB_TABLE_INDICATOR: u8 = 127;
 
 fn encode_code_lens(lens: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -632,7 +638,7 @@ fn huff_decode_uint16(data: &[u8], expected_len: usize) -> Result<Vec<u16>, Stri
         next_code[bits] = code;
     }
 
-    let mut root_table = [TableEntry::default(); 512];
+    let mut root_table = [0u16; 512];
     let mut sub_tables = Vec::new();
     let mut sub_table_map = [-1i16; 512];
 
@@ -649,21 +655,15 @@ fn huff_decode_uint16(data: &[u8], expected_len: usize) -> Result<Vec<u16>, Stri
             let start = (c << pad) as usize;
             let end = start + (1 << pad);
             for idx in start..end {
-                root_table[idx] = TableEntry {
-                    sym: sym as u16,
-                    bits: cl as u8,
-                };
+                root_table[idx] = pack_table_entry(sym as u16, cl as u8);
             }
         } else {
             let prefix = (c >> (cl - 9)) as usize;
             let sub_idx = if sub_table_map[prefix] == -1 {
                 let idx = sub_tables.len() / 64;
-                sub_tables.resize(sub_tables.len() + 64, TableEntry::default());
+                sub_tables.resize(sub_tables.len() + 64, 0u16);
                 sub_table_map[prefix] = idx as i16;
-                root_table[prefix] = TableEntry {
-                    sym: idx as u16,
-                    bits: 255,
-                };
+                root_table[prefix] = pack_table_entry(idx as u16, SUB_TABLE_INDICATOR);
                 idx
             } else {
                 sub_table_map[prefix] as usize
@@ -675,10 +675,7 @@ fn huff_decode_uint16(data: &[u8], expected_len: usize) -> Result<Vec<u16>, Stri
             let end = start + (1 << suffix_pad);
             let base_idx = sub_idx * 64;
             for idx in start..end {
-                sub_tables[base_idx + idx] = TableEntry {
-                    sym: sym as u16,
-                    bits: cl as u8,
-                };
+                sub_tables[base_idx + idx] = pack_table_entry(sym as u16, cl as u8);
             }
         }
     }
@@ -691,20 +688,22 @@ fn huff_decode_uint16(data: &[u8], expected_len: usize) -> Result<Vec<u16>, Stri
         let peek15 = reader.peek(15) as usize;
         let root_idx = peek15 >> 6;
         let entry = unsafe { *root_table.get_unchecked(root_idx) };
-        if entry.bits == 255 {
-            let sub_idx = (entry.sym as usize) * 64 + (peek15 & 0x3F);
+        let (sym, bits) = unpack_table_entry(entry);
+        if bits == SUB_TABLE_INDICATOR {
+            let sub_idx = (sym as usize) * 64 + (peek15 & 0x3F);
             let sub_entry = unsafe { *sub_tables_slice.get_unchecked(sub_idx) };
-            if sub_entry.bits == 0 {
+            let (sub_sym, sub_bits) = unpack_table_entry(sub_entry);
+            if sub_bits == 0 {
                 return Err("huffUint16: invalid code".to_string());
             }
-            out.push(sub_entry.sym);
-            reader.consume(sub_entry.bits as usize);
+            out.push(sub_sym);
+            reader.consume(sub_bits as usize);
         } else {
-            if entry.bits == 0 {
+            if bits == 0 {
                 return Err("huffUint16: invalid code".to_string());
             }
-            out.push(entry.sym);
-            reader.consume(entry.bits as usize);
+            out.push(sym);
+            reader.consume(bits as usize);
         }
     }
 
@@ -829,7 +828,7 @@ fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
         next_code[bits] = code;
     }
 
-    let mut root_table = [TableEntry::default(); 512];
+    let mut root_table = [0u16; 512];
     let mut sub_tables = Vec::new();
     let mut sub_table_map = [-1i16; 512];
 
@@ -846,21 +845,15 @@ fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
             let start = (c << pad) as usize;
             let end = start + (1 << pad);
             for idx in start..end {
-                root_table[idx] = TableEntry {
-                    sym: sym as u16,
-                    bits: cl as u8,
-                };
+                root_table[idx] = pack_table_entry(sym as u16, cl as u8);
             }
         } else {
             let prefix = (c >> (cl - 9)) as usize;
             let sub_idx = if sub_table_map[prefix] == -1 {
                 let idx = sub_tables.len() / 64;
-                sub_tables.resize(sub_tables.len() + 64, TableEntry::default());
+                sub_tables.resize(sub_tables.len() + 64, 0u16);
                 sub_table_map[prefix] = idx as i16;
-                root_table[prefix] = TableEntry {
-                    sym: idx as u16,
-                    bits: 255,
-                };
+                root_table[prefix] = pack_table_entry(idx as u16, SUB_TABLE_INDICATOR);
                 idx
             } else {
                 sub_table_map[prefix] as usize
@@ -872,10 +865,7 @@ fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
             let end = start + (1 << suffix_pad);
             let base_idx = sub_idx * 64;
             for idx in start..end {
-                sub_tables[base_idx + idx] = TableEntry {
-                    sym: sym as u16,
-                    bits: cl as u8,
-                };
+                sub_tables[base_idx + idx] = pack_table_entry(sym as u16, cl as u8);
             }
         }
     }
@@ -888,20 +878,22 @@ fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
         let peek15 = reader.peek(15) as usize;
         let root_idx = peek15 >> 6;
         let entry = unsafe { *root_table.get_unchecked(root_idx) };
-        if entry.bits == 255 {
-            let sub_idx = (entry.sym as usize) * 64 + (peek15 & 0x3F);
+        let (sym, bits) = unpack_table_entry(entry);
+        if bits == SUB_TABLE_INDICATOR {
+            let sub_idx = (sym as usize) * 64 + (peek15 & 0x3F);
             let sub_entry = unsafe { *sub_tables_slice.get_unchecked(sub_idx) };
-            if sub_entry.bits == 0 {
+            let (sub_sym, sub_bits) = unpack_table_entry(sub_entry);
+            if sub_bits == 0 {
                 return Err("huff: invalid code".to_string());
             }
-            out.push(sub_entry.sym as u8);
-            reader.consume(sub_entry.bits as usize);
+            out.push(sub_sym as u8);
+            reader.consume(sub_bits as usize);
         } else {
-            if entry.bits == 0 {
+            if bits == 0 {
                 return Err("huff: invalid code".to_string());
             }
-            out.push(entry.sym as u8);
-            reader.consume(entry.bits as usize);
+            out.push(sym as u8);
+            reader.consume(bits as usize);
         }
     }
 
@@ -1260,12 +1252,12 @@ pub(crate) fn deflate_style_decode(data: &[u8], expected_len: usize) -> Result<V
                 let last = *out.last().unwrap();
                 out.resize(out.len() + ml, last);
             } else {
+                let start = out.len() - dist;
                 let mut copied = 0;
                 while copied < ml {
-                    let chunk = std::cmp::min(ml - copied, dist);
-                    let start = out.len() - dist;
-                    out.extend_from_within(start..start + chunk);
-                    copied += chunk;
+                    let take = (dist + copied).min(ml - copied);
+                    out.extend_from_within(start..start + take);
+                    copied += take;
                 }
             }
         }
@@ -1760,17 +1752,13 @@ pub fn smart_compress(data: &[u8]) -> Option<(Vec<u8>, CompressMethod)> {
     let skip_shuffle = estimate_entropy(data) > 7.5;
     let mut best: Option<(Vec<u8>, CompressMethod)> = None;
 
-    let consider = |cand: Option<Vec<u8>>, m: CompressMethod, best: &mut Option<(Vec<u8>, CompressMethod)>| -> bool {
+    let consider = |cand: Option<Vec<u8>>, m: CompressMethod, best: &mut Option<(Vec<u8>, CompressMethod)>| {
         if let Some(c) = cand {
             let len = c.len();
             if best.is_none() || len < best.as_ref().unwrap().0.len() {
                 *best = Some((c, m));
             }
-            if len * 5 < n {
-                return true;
-            }
         }
-        false
     };
 
     // Above this size, the single-threaded non-blocked passes become the bottleneck
@@ -1779,55 +1767,104 @@ pub fn smart_compress(data: &[u8]) -> Option<(Vec<u8>, CompressMethod)> {
 
     if n >= PARALLEL_ONLY_THRESHOLD {
         // Large files: only internally-parallel blocked variants (fast + per-block trees).
-        if consider(deflate_blocked_encode(data), CompressMethod::Blocked, &mut best) {
-            return best;
-        }
+        let mut block_cand = None;
+        let mut shuf_blk_cand = None;
+        let mut shuf2_blk_cand = None;
 
-        if !skip_shuffle {
-            let shuffled4 = byte_shuffle(data, 4);
-            let done = consider(deflate_blocked_encode(&shuffled4), CompressMethod::ShuffleBlk, &mut best);
-            drop(shuffled4);
-            if done {
-                return best;
+        std::thread::scope(|s| {
+            let h1 = s.spawn(|| deflate_blocked_encode(data));
+            let h2 = if !skip_shuffle {
+                let shuf4 = byte_shuffle(data, 4);
+                Some(s.spawn(move || deflate_blocked_encode(&shuf4)))
+            } else {
+                None
+            };
+            let h3 = if !skip_shuffle {
+                let shuf2 = byte_shuffle(data, 2);
+                Some(s.spawn(move || deflate_blocked_encode(&shuf2)))
+            } else {
+                None
+            };
+
+            block_cand = h1.join().unwrap();
+            if let Some(h) = h2 {
+                shuf_blk_cand = h.join().unwrap();
             }
+            if let Some(h) = h3 {
+                shuf2_blk_cand = h.join().unwrap();
+            }
+        });
 
-            let shuffled2 = byte_shuffle(data, 2);
-            consider(deflate_blocked_encode(&shuffled2), CompressMethod::Shuffle2Blk, &mut best);
-        }
+        consider(block_cand, CompressMethod::Blocked, &mut best);
+        consider(shuf_blk_cand, CompressMethod::ShuffleBlk, &mut best);
+        consider(shuf2_blk_cand, CompressMethod::Shuffle2Blk, &mut best);
     } else {
         // Small/medium files: cheap single-threaded passes over candidate transforms,
         // plus blocked variants when the data spans more than one block.
-        if consider(deflate_style_encode(data), CompressMethod::Plain, &mut best) {
-            return best;
-        }
+        let mut plain_cand = None;
+        let mut shuf_cand = None;
+        let mut shuf2_cand = None;
+        let mut blk_cand = None;
+        let mut shuf_blk_cand = None;
+        let mut shuf2_blk_cand = None;
 
-        if !skip_shuffle {
-            let shuffled4 = byte_shuffle(data, 4);
-            let done = consider(deflate_style_encode(&shuffled4), CompressMethod::Shuffle, &mut best);
-            if done {
-                return best;
-            }
+        std::thread::scope(|s| {
+            let h_plain = s.spawn(|| deflate_style_encode(data));
+            let h_shuf = if !skip_shuffle {
+                let shuf4 = byte_shuffle(data, 4);
+                Some(s.spawn(move || deflate_style_encode(&shuf4)))
+            } else {
+                None
+            };
+            let h_shuf2 = if !skip_shuffle {
+                let shuf2 = byte_shuffle(data, 2);
+                Some(s.spawn(move || deflate_style_encode(&shuf2)))
+            } else {
+                None
+            };
 
-            let shuffled2 = byte_shuffle(data, 2);
-            let done = consider(deflate_style_encode(&shuffled2), CompressMethod::Shuffle2, &mut best);
-            if done {
-                return best;
-            }
+            let h_blk = if n >= BLOCK_SIZE {
+                Some(s.spawn(move || deflate_blocked_encode(data)))
+            } else {
+                None
+            };
+            let h_shuf_blk = if n >= BLOCK_SIZE && !skip_shuffle {
+                let shuf4 = byte_shuffle(data, 4);
+                Some(s.spawn(move || deflate_blocked_encode(&shuf4)))
+            } else {
+                None
+            };
+            let h_shuf2_blk = if n >= BLOCK_SIZE && !skip_shuffle {
+                let shuf2 = byte_shuffle(data, 2);
+                Some(s.spawn(move || deflate_blocked_encode(&shuf2)))
+            } else {
+                None
+            };
 
-            if n >= BLOCK_SIZE {
-                if consider(deflate_blocked_encode(data), CompressMethod::Blocked, &mut best) {
-                    return best;
-                }
-                let done = consider(deflate_blocked_encode(&shuffled4), CompressMethod::ShuffleBlk, &mut best);
-                drop(shuffled4);
-                if done {
-                    return best;
-                }
-                consider(deflate_blocked_encode(&shuffled2), CompressMethod::Shuffle2Blk, &mut best);
+            plain_cand = h_plain.join().unwrap();
+            if let Some(h) = h_shuf {
+                shuf_cand = h.join().unwrap();
             }
-        } else if n >= BLOCK_SIZE {
-            consider(deflate_blocked_encode(data), CompressMethod::Blocked, &mut best);
-        }
+            if let Some(h) = h_shuf2 {
+                shuf2_cand = h.join().unwrap();
+            }
+            if let Some(h) = h_blk {
+                blk_cand = h.join().unwrap();
+            }
+            if let Some(h) = h_shuf_blk {
+                shuf_blk_cand = h.join().unwrap();
+            }
+            if let Some(h) = h_shuf2_blk {
+                shuf2_blk_cand = h.join().unwrap();
+            }
+        });
+
+        consider(plain_cand, CompressMethod::Plain, &mut best);
+        consider(shuf_cand, CompressMethod::Shuffle, &mut best);
+        consider(shuf2_cand, CompressMethod::Shuffle2, &mut best);
+        consider(blk_cand, CompressMethod::Blocked, &mut best);
+        consider(shuf_blk_cand, CompressMethod::ShuffleBlk, &mut best);
+        consider(shuf2_blk_cand, CompressMethod::Shuffle2Blk, &mut best);
     }
 
     best
