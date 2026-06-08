@@ -71,6 +71,11 @@ run_tool() {
 
 bench_file() {
     local name="$1" path="$2" heavy="$3"
+    if [[ ! -f "$path" ]]; then
+        echo
+        echo "### $name — (file not found: $path)"
+        return
+    fi
     local orig; orig="$(stat -f%z "$path")"
     echo
     echo "### $name — $(python3 -c "print(f'{$orig/1048576:.2f} MB')") ($orig bytes)"
@@ -78,7 +83,7 @@ bench_file() {
     printf "  %s\n" "---------------------------------------------------------------------------"
 
     run_tool "bounce"   "$orig" "$TMP/o.bnc" \
-        "'$BOUNCE' c '$TMP/o.bnc' '$path' -q" \
+        "'$BOUNCE' c '$TMP/o.bnc' -2 '$path' -q" \
         "'$BOUNCE' x '$TMP/o.bnc' -c"
 
     if [[ "$ONLY_BOUNCE" == "1" ]]; then

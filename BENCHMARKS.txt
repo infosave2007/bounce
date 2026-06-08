@@ -6,7 +6,7 @@
 ### Safetensors Model Weights — 450.05 MB (471913120 bytes)
   tool                       size     ratio      compress    decompress
   ---------------------------------------------------------------------------
-  bounce                   340775213 B    72.2%  C:    50.7 MB/s  D:   449.5 MB/s
+  bounce                   339380024 B    71.9%  C:    34.9 MB/s  D:   452.7 MB/s
   gzip -9                  374391731 B    79.3%  C:    18.1 MB/s  D:   352.9 MB/s
   lz4 -9                   468560164 B    99.3%  C:   189.5 MB/s  D:  2044.8 MB/s
   zstd -19                 359412232 B    76.2%  C:    12.4 MB/s  D:   383.5 MB/s
