@@ -1902,14 +1902,18 @@ pub fn smart_compress_with_version(
         std::thread::scope(|s| {
             let h1 = s.spawn(|| deflate_blocked_encode_with_version(data, window_size, block_size, version));
             let h2 = if !skip_shuffle {
-                let shuf4 = byte_shuffle(data, 4);
-                Some(s.spawn(move || deflate_blocked_encode_with_version(&shuf4, window_size, block_size, version)))
+                Some(s.spawn(move || {
+                    let shuf4 = byte_shuffle(data, 4);
+                    deflate_blocked_encode_with_version(&shuf4, window_size, block_size, version)
+                }))
             } else {
                 None
             };
             let h3 = if !skip_shuffle {
-                let shuf2 = byte_shuffle(data, 2);
-                Some(s.spawn(move || deflate_blocked_encode_with_version(&shuf2, window_size, block_size, version)))
+                Some(s.spawn(move || {
+                    let shuf2 = byte_shuffle(data, 2);
+                    deflate_blocked_encode_with_version(&shuf2, window_size, block_size, version)
+                }))
             } else {
                 None
             };
@@ -1937,14 +1941,18 @@ pub fn smart_compress_with_version(
         std::thread::scope(|s| {
             let h_plain = s.spawn(|| deflate_style_encode_with_version(data, window_size, version));
             let h_shuf = if !skip_shuffle {
-                let shuf4 = byte_shuffle(data, 4);
-                Some(s.spawn(move || deflate_style_encode_with_version(&shuf4, window_size, version)))
+                Some(s.spawn(move || {
+                    let shuf4 = byte_shuffle(data, 4);
+                    deflate_style_encode_with_version(&shuf4, window_size, version)
+                }))
             } else {
                 None
             };
             let h_shuf2 = if !skip_shuffle {
-                let shuf2 = byte_shuffle(data, 2);
-                Some(s.spawn(move || deflate_style_encode_with_version(&shuf2, window_size, version)))
+                Some(s.spawn(move || {
+                    let shuf2 = byte_shuffle(data, 2);
+                    deflate_style_encode_with_version(&shuf2, window_size, version)
+                }))
             } else {
                 None
             };
@@ -1955,14 +1963,18 @@ pub fn smart_compress_with_version(
                 None
             };
             let h_shuf_blk = if n >= block_size && !skip_shuffle {
-                let shuf4 = byte_shuffle(data, 4);
-                Some(s.spawn(move || deflate_blocked_encode_with_version(&shuf4, window_size, block_size, version)))
+                Some(s.spawn(move || {
+                    let shuf4 = byte_shuffle(data, 4);
+                    deflate_blocked_encode_with_version(&shuf4, window_size, block_size, version)
+                }))
             } else {
                 None
             };
             let h_shuf2_blk = if n >= block_size && !skip_shuffle {
-                let shuf2 = byte_shuffle(data, 2);
-                Some(s.spawn(move || deflate_blocked_encode_with_version(&shuf2, window_size, block_size, version)))
+                Some(s.spawn(move || {
+                    let shuf2 = byte_shuffle(data, 2);
+                    deflate_blocked_encode_with_version(&shuf2, window_size, block_size, version)
+                }))
             } else {
                 None
             };
