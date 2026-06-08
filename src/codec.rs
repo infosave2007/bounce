@@ -670,9 +670,9 @@ fn huff_decode_uint16(data: &[u8], expected_len: usize, version: u8) -> Result<V
         next_code[bits] = code;
     }
 
-    let mut root_table = [0u16; 512];
+    let mut root_table = [0u16; 2048];
     let mut sub_tables = Vec::new();
-    let mut sub_table_map = [-1i16; 512];
+    let mut sub_table_map = [-1i16; 2048];
 
     for sym in 0..HUFF_UINT16_ALPHABET_SIZE {
         let cl = code_lens[sym] as usize;
@@ -682,18 +682,18 @@ fn huff_decode_uint16(data: &[u8], expected_len: usize, version: u8) -> Result<V
         let c = next_code[cl];
         next_code[cl] += 1;
 
-        if cl <= 9 {
-            let pad = 9 - cl;
+        if cl <= 11 {
+            let pad = 11 - cl;
             let start = (c << pad) as usize;
             let end = start + (1 << pad);
             for idx in start..end {
                 root_table[idx] = pack_table_entry(sym as u16, cl as u8);
             }
         } else {
-            let prefix = (c >> (cl - 9)) as usize;
+            let prefix = (c >> (cl - 11)) as usize;
             let sub_idx = if sub_table_map[prefix] == -1 {
-                let idx = sub_tables.len() / 64;
-                sub_tables.resize(sub_tables.len() + 64, 0u16);
+                let idx = sub_tables.len() / 16;
+                sub_tables.resize(sub_tables.len() + 16, 0u16);
                 sub_table_map[prefix] = idx as i16;
                 root_table[prefix] = pack_table_entry(idx as u16, SUB_TABLE_INDICATOR);
                 idx
@@ -701,11 +701,11 @@ fn huff_decode_uint16(data: &[u8], expected_len: usize, version: u8) -> Result<V
                 sub_table_map[prefix] as usize
             };
 
-            let suffix = c & ((1 << (cl - 9)) - 1);
+            let suffix = c & ((1 << (cl - 11)) - 1);
             let suffix_pad = 15 - cl;
             let start = (suffix << suffix_pad) as usize;
             let end = start + (1 << suffix_pad);
-            let base_idx = sub_idx * 64;
+            let base_idx = sub_idx * 16;
             for idx in start..end {
                 sub_tables[base_idx + idx] = pack_table_entry(sym as u16, cl as u8);
             }
@@ -718,11 +718,11 @@ fn huff_decode_uint16(data: &[u8], expected_len: usize, version: u8) -> Result<V
 
     while out.len() < expected_len {
         let peek15 = reader.peek(15) as usize;
-        let root_idx = peek15 >> 6;
+        let root_idx = peek15 >> 4;
         let entry = unsafe { *root_table.get_unchecked(root_idx) };
         let (sym, bits) = unpack_table_entry(entry);
         if bits == SUB_TABLE_INDICATOR {
-            let sub_idx = (sym as usize) * 64 + (peek15 & 0x3F);
+            let sub_idx = (sym as usize) * 16 + (peek15 & 0x0F);
             let sub_entry = unsafe { *sub_tables_slice.get_unchecked(sub_idx) };
             let (sub_sym, sub_bits) = unpack_table_entry(sub_entry);
             if sub_bits == 0 {
@@ -860,9 +860,9 @@ fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
         next_code[bits] = code;
     }
 
-    let mut root_table = [0u16; 512];
+    let mut root_table = [0u16; 2048];
     let mut sub_tables = Vec::new();
-    let mut sub_table_map = [-1i16; 512];
+    let mut sub_table_map = [-1i16; 2048];
 
     for sym in 0..HUFF_ALPHABET_SIZE {
         let cl = code_lens[sym] as usize;
@@ -872,18 +872,18 @@ fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
         let c = next_code[cl];
         next_code[cl] += 1;
 
-        if cl <= 9 {
-            let pad = 9 - cl;
+        if cl <= 11 {
+            let pad = 11 - cl;
             let start = (c << pad) as usize;
             let end = start + (1 << pad);
             for idx in start..end {
                 root_table[idx] = pack_table_entry(sym as u16, cl as u8);
             }
         } else {
-            let prefix = (c >> (cl - 9)) as usize;
+            let prefix = (c >> (cl - 11)) as usize;
             let sub_idx = if sub_table_map[prefix] == -1 {
-                let idx = sub_tables.len() / 64;
-                sub_tables.resize(sub_tables.len() + 64, 0u16);
+                let idx = sub_tables.len() / 16;
+                sub_tables.resize(sub_tables.len() + 16, 0u16);
                 sub_table_map[prefix] = idx as i16;
                 root_table[prefix] = pack_table_entry(idx as u16, SUB_TABLE_INDICATOR);
                 idx
@@ -891,11 +891,11 @@ fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
                 sub_table_map[prefix] as usize
             };
 
-            let suffix = c & ((1 << (cl - 9)) - 1);
+            let suffix = c & ((1 << (cl - 11)) - 1);
             let suffix_pad = 15 - cl;
             let start = (suffix << suffix_pad) as usize;
             let end = start + (1 << suffix_pad);
-            let base_idx = sub_idx * 64;
+            let base_idx = sub_idx * 16;
             for idx in start..end {
                 sub_tables[base_idx + idx] = pack_table_entry(sym as u16, cl as u8);
             }
@@ -908,11 +908,11 @@ fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
 
     while out.len() < expected_len {
         let peek15 = reader.peek(15) as usize;
-        let root_idx = peek15 >> 6;
+        let root_idx = peek15 >> 4;
         let entry = unsafe { *root_table.get_unchecked(root_idx) };
         let (sym, bits) = unpack_table_entry(entry);
         if bits == SUB_TABLE_INDICATOR {
-            let sub_idx = (sym as usize) * 64 + (peek15 & 0x3F);
+            let sub_idx = (sym as usize) * 16 + (peek15 & 0x0F);
             let sub_entry = unsafe { *sub_tables_slice.get_unchecked(sub_idx) };
             let (sub_sym, sub_bits) = unpack_table_entry(sub_entry);
             if sub_bits == 0 {
