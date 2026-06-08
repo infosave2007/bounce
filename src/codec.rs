@@ -625,15 +625,10 @@ impl<'a> BitReader<'a> {
         }
         if self.bits_left >= n {
             let shift_amt = self.bits_left - n;
-            let val = if shift_amt >= 64 {
-                0
-            } else {
-                self.bit_buf >> shift_amt
-            };
-            let mask = if n >= 64 { !0 } else { (1u64 << n) - 1 };
-            (val & mask) as u32
+            let mask = (1u64 << n) - 1;
+            ((self.bit_buf >> shift_amt) & mask) as u32
         } else {
-            let mask = if self.bits_left >= 64 { !0 } else { (1u64 << self.bits_left) - 1 };
+            let mask = (1u64 << self.bits_left) - 1;
             ((self.bit_buf & mask) << (n - self.bits_left)) as u32
         }
     }
@@ -1133,6 +1128,10 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
     let mut i = 0;
     const GOOD_MATCH: usize = 32;
     while i < n {
+        if i + 64 < n {
+            let h_next = lzv2_hash(data, i + 64) as usize;
+            unsafe { std::ptr::read_volatile(&head[h_next]) };
+        }
         let mut best_len = 0;
         let mut best_dist = 0;
         if i + LZV2_MIN_MATCH <= n {
