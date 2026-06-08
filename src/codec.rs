@@ -110,178 +110,209 @@ fn code_to_len(code: u8, extra: u16) -> u16 {
     LEN_CODE_TABLE[code as usize].0 + extra
 }
 
-fn package_merge_sorted_in_place(max_length: usize, num_codes: usize, a: &mut [usize]) -> usize {
-    if num_codes == 0 || max_length == 0 {
-        return 0;
+#[derive(Clone, Copy, Default)]
+struct FlatNode {
+    freq: usize,
+    sym: i16,
+    left: Option<u16>,
+    right: Option<u16>,
+}
+
+fn huff_assign_lengths(
+    max_bits: usize,
+    alphabet_size: usize,
+    freq: &[usize],
+    code_lens: &mut [u8],
+) {
+    for i in 0..alphabet_size {
+        code_lens[i] = 0;
     }
-    if num_codes <= 2 {
-        a[0] = 1;
-        if num_codes == 2 {
-            a[1] = 1;
+
+    let mut unique_count = 0;
+    for &f in freq {
+        if f > 0 {
+            unique_count += 1;
         }
-        return 1;
     }
 
-    if max_length > 63 {
-        return 0;
+    if unique_count == 0 {
+        return;
     }
 
-    let encoding_limit = 1u64 << max_length;
-    if encoding_limit < num_codes as u64 {
-        return 0;
-    }
-
-    let max_buffer = 2 * num_codes;
-    let mut current = vec![0usize; max_buffer];
-    let mut previous = vec![0usize; max_buffer];
-    let mut is_merged = vec![0u64; max_buffer];
-
-    for i in 0..num_codes {
-        previous[i] = a[i];
-    }
-    let mut num_previous = num_codes;
-    let num_relevant = 2 * num_codes - 2;
-
-    let mut mask = 1u64;
-    for _bits in (1..max_length).rev() {
-        num_previous &= !1;
-
-        current[0] = a[0];
-        current[1] = a[1];
-        let mut sum = current[0] + current[1];
-
-        let mut num_current = 2;
-        let mut num_hist = num_current;
-        let mut num_merged = 0;
-
-        loop {
-            if num_hist < num_codes && a[num_hist] <= sum {
-                current[num_current] = a[num_hist];
-                num_current += 1;
-                num_hist += 1;
-                continue;
-            }
-
-            is_merged[num_current] |= mask;
-            current[num_current] = sum;
-            num_current += 1;
-            num_merged += 1;
-
-            if num_merged * 2 >= num_previous {
+    if unique_count == 1 {
+        for i in 0..alphabet_size {
+            if freq[i] > 0 {
+                code_lens[i] = 1;
                 break;
             }
-
-            sum = previous[num_merged * 2] + previous[num_merged * 2 + 1];
         }
+        return;
+    }
 
-        while num_hist < num_codes {
-            current[num_current] = a[num_hist];
-            num_current += 1;
-            num_hist += 1;
-        }
+    let mut nodes = [FlatNode::default(); 576];
+    let mut nodes_len = 0;
 
-        mask <<= 1;
+    struct StackHeap {
+        data: [(usize, u16); 288],
+        len: usize,
+    }
 
-        if num_previous >= num_relevant {
-            let mut keep_going = false;
-            for i in (1..num_relevant).rev() {
-                if previous[i] != current[i] {
-                    keep_going = true;
+    impl StackHeap {
+        fn push(&mut self, val: (usize, u16)) {
+            let mut idx = self.len;
+            self.data[idx] = val;
+            self.len += 1;
+            while idx > 0 {
+                let parent = (idx - 1) / 2;
+                if self.data[idx].0 < self.data[parent].0 {
+                    self.data.swap(idx, parent);
+                    idx = parent;
+                } else {
                     break;
                 }
             }
-            if !keep_going {
-                break;
+        }
+
+        fn pop(&mut self) -> (usize, u16) {
+            let res = self.data[0];
+            self.len -= 1;
+            if self.len > 0 {
+                self.data[0] = self.data[self.len];
+                let mut idx = 0;
+                while idx * 2 + 1 < self.len {
+                    let mut child = idx * 2 + 1;
+                    if child + 1 < self.len && self.data[child + 1].0 < self.data[child].0 {
+                        child += 1;
+                    }
+                    if self.data[child].0 < self.data[idx].0 {
+                        self.data.swap(idx, child);
+                        idx = child;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            res
+        }
+    }
+
+    let mut heap = StackHeap {
+        data: [(0, 0); 288],
+        len: 0,
+    };
+
+    for sym in 0..alphabet_size {
+        if freq[sym] > 0 {
+            let idx = nodes_len;
+            nodes[idx] = FlatNode {
+                freq: freq[sym],
+                sym: sym as i16,
+                left: None,
+                right: None,
+            };
+            nodes_len += 1;
+            heap.push((freq[sym], idx as u16));
+        }
+    }
+
+    while heap.len > 1 {
+        let (f1, child1) = heap.pop();
+        let (f2, child2) = heap.pop();
+        let merged_freq = f1 + f2;
+        let merged_idx = nodes_len;
+        nodes[merged_idx] = FlatNode {
+            freq: merged_freq,
+            sym: -1,
+            left: Some(child1),
+            right: Some(child2),
+        };
+        nodes_len += 1;
+        heap.push((merged_freq, merged_idx as u16));
+    }
+
+    let root = heap.pop().1 as usize;
+
+    fn assign_depths(nodes: &[FlatNode], curr: usize, depth: u8, code_lens: &mut [u8]) {
+        let node = &nodes[curr];
+        if node.sym >= 0 {
+            code_lens[node.sym as usize] = depth;
+        } else {
+            if let Some(left) = node.left {
+                assign_depths(nodes, left as usize, depth + 1, code_lens);
+            }
+            if let Some(right) = node.right {
+                assign_depths(nodes, right as usize, depth + 1, code_lens);
             }
         }
-
-        std::mem::swap(&mut previous, &mut current);
-        num_previous = num_current;
     }
 
-    mask >>= 1;
+    assign_depths(&nodes[..nodes_len], root, 0, code_lens);
 
-    for i in 0..num_codes {
-        a[i] = 0;
-    }
-
-    let mut num_analyze = num_relevant;
-    while mask != 0 {
-        let mut num_merged = 0;
-        a[0] += 1;
-        a[1] += 1;
-        let mut symbol = 2;
-
-        for i in symbol..num_analyze {
-            if (is_merged[i] & mask) == 0 {
-                a[symbol] += 1;
-                symbol += 1;
-            } else {
-                num_merged += 1;
+    let mut bl_count = [0usize; 288];
+    let mut max_len = 0;
+    for &len in code_lens.iter() {
+        if len > 0 {
+            let l = len as usize;
+            bl_count[l] += 1;
+            if l > max_len {
+                max_len = l;
             }
         }
-
-        num_analyze = 2 * num_merged;
-        mask >>= 1;
     }
 
-    for i in 0..num_analyze {
-        a[i] += 1;
+    if max_len <= max_bits {
+        return;
     }
 
-    a[0]
-}
-
-struct KeyValue {
-    key: usize,
-    value: usize,
-}
-
-fn package_merge(
-    max_length: usize,
-    num_codes: usize,
-    histogram: &[usize],
-    code_lengths: &mut [u8],
-) -> usize {
-    for i in 0..num_codes {
-        code_lengths[i] = 0;
-    }
-
-    let mut num_nonzero = 0;
-    for i in 0..num_codes {
-        if histogram[i] != 0 {
-            num_nonzero += 1;
+    let mut sum_scaled = 0u128;
+    for d in (max_bits + 1)..=max_len {
+        if bl_count[d] > 0 {
+            let count = bl_count[d] as u128;
+            let term1 = count << 97;
+            let term2 = count << (112 - d);
+            sum_scaled += term1 - term2;
+            bl_count[max_bits] += bl_count[d];
+            bl_count[d] = 0;
         }
     }
 
-    if num_nonzero == 0 {
-        return 0;
+    let mut overflow = (sum_scaled >> 96) as usize;
+
+    while overflow > 0 {
+        let mut bits = max_bits - 1;
+        while bits > 0 && bl_count[bits] == 0 {
+            bits -= 1;
+        }
+        if bits == 0 {
+            break;
+        }
+        bl_count[bits] -= 1;
+        bl_count[bits + 1] += 2;
+        bl_count[max_bits] -= 1;
+        overflow -= 2;
     }
 
-    let mut mapping = Vec::with_capacity(num_nonzero);
-    for i in 0..num_codes {
-        if histogram[i] != 0 {
-            mapping.push(KeyValue {
-                key: histogram[i],
-                value: i,
-            });
+    let mut active_syms = [0u16; 288];
+    let mut active_count = 0;
+    for sym in 0..alphabet_size {
+        if freq[sym] > 0 {
+            active_syms[active_count] = sym as u16;
+            active_count += 1;
         }
     }
 
-    mapping.sort_by_key(|kv| kv.key);
+    active_syms[..active_count].sort_unstable_by_key(|&sym| freq[sym as usize]);
 
-    let mut sorted = Vec::with_capacity(num_nonzero);
-    for i in 0..num_nonzero {
-        sorted.push(mapping[i].key);
+    let mut sym_idx = 0;
+    for bits in (1..=max_bits).rev() {
+        let count = bl_count[bits];
+        for _ in 0..count {
+            if sym_idx < active_count {
+                code_lens[active_syms[sym_idx] as usize] = bits as u8;
+                sym_idx += 1;
+            }
+        }
     }
-
-    let result = package_merge_sorted_in_place(max_length, num_nonzero, &mut sorted);
-
-    for i in 0..num_nonzero {
-        code_lengths[mapping[i].value] = sorted[i] as u8;
-    }
-
-    result
 }
 
 #[derive(Clone, Copy, Default)]
@@ -440,7 +471,7 @@ fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
     }
 
     let mut code_lens = [0u8; HUFF_UINT16_ALPHABET_SIZE];
-    package_merge(15, HUFF_UINT16_ALPHABET_SIZE, &freq, &mut code_lens);
+    huff_assign_lengths(15, HUFF_UINT16_ALPHABET_SIZE, &freq, &mut code_lens);
 
     let mut bl_count = [0usize; 16];
     let mut max_bits = 0;
@@ -706,7 +737,7 @@ fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
     }
 
     let mut code_lens = [0u8; HUFF_ALPHABET_SIZE];
-    package_merge(15, HUFF_ALPHABET_SIZE, &freq, &mut code_lens);
+    huff_assign_lengths(15, HUFF_ALPHABET_SIZE, &freq, &mut code_lens);
 
     let mut bl_count = [0usize; 16];
     let mut max_bits = 0;
