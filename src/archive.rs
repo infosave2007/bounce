@@ -257,6 +257,7 @@ pub struct CreateStats {
 pub fn create(
     archive_path: &str,
     inputs: &[String],
+    level: u8,
     verbose: bool,
 ) -> io::Result<CreateStats> {
     let files = collect_inputs(inputs)?;
@@ -266,6 +267,18 @@ pub fn create(
             "no regular files to archive",
         ));
     }
+
+    let (window_size, block_size) = match level {
+        1 => (65536, 32768),
+        2 => (128 * 1024, 128 * 1024),
+        3 => (256 * 1024, 256 * 1024),
+        4 => (512 * 1024, 512 * 1024),
+        5 => (1024 * 1024, 1024 * 1024),
+        6 => (2048 * 1024, 2048 * 1024),
+        7 => (4096 * 1024, 4096 * 1024),
+        8 => (8192 * 1024, 8192 * 1024),
+        _ => (65536, 32768), // fallback
+    };
 
     let out_file = fs::File::create(archive_path)?;
     let mut w = BufWriter::with_capacity(2 * 1024 * 1024, out_file);
@@ -300,7 +313,7 @@ pub fn create(
                         let data = fs::read(&abs_path)?;
                         let crc = crc32(&data);
                         let (payload, method, stored_raw): (Vec<u8>, u8, bool) =
-                            match codec::smart_compress_with_version(&data, FORMAT_VERSION) {
+                            match codec::smart_compress_with_version(&data, window_size, block_size, FORMAT_VERSION) {
                                 Some((c, m)) if c.len() < data.len() => (c, m.to_u8(), false),
                                 _ => (data.clone(), codec::CompressMethod::Plain.to_u8(), true),
                             };
@@ -400,7 +413,7 @@ pub fn create(
                 file.read_exact(&mut sample)?;
                 file.seek(SeekFrom::Start(0))?;
 
-                let method = match codec::smart_compress_with_version(&sample, FORMAT_VERSION) {
+                let method = match codec::smart_compress_with_version(&sample, window_size, block_size, FORMAT_VERSION) {
                     Some((_, codec::CompressMethod::Shuffle)) | Some((_, codec::CompressMethod::ShuffleBlk)) => {
                         codec::CompressMethod::ShuffleBlk
                     }
@@ -416,13 +429,13 @@ pub fn create(
 
                 if method == codec::CompressMethod::Blocked {
                     let mut reader = BufReader::with_capacity(2 * 1024 * 1024, file);
-                    let mut buffer = vec![0u8; codec::BLOCK_SIZE];
+                    let mut buffer = vec![0u8; block_size];
                     let mut head = vec![-1i32; codec::LZV2_HASH_SIZE];
-                    let mut prev = vec![0i32; codec::LZV2_WINDOW_SIZE];
+                    let mut prev = vec![0i32; window_size];
 
                     loop {
                         let mut block_len = 0;
-                        while block_len < codec::BLOCK_SIZE {
+                        while block_len < block_size {
                             match reader.read(&mut buffer[block_len..]) {
                                 Ok(0) => break,
                                 Ok(n) => block_len += n,
@@ -439,7 +452,7 @@ pub fn create(
                         orig_size += block_len as u64;
 
                         head.fill(-1);
-                        let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, FORMAT_VERSION);
+                        let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, window_size, FORMAT_VERSION);
                         let res = codec::encode_block_result(block, c_opt);
                         w.write_all(&res)?;
                         num_blocks += 1;
@@ -450,19 +463,19 @@ pub fn create(
                     let mut prev_byte = [0u8; 4];
 
                     // Buffer for each lane before compression
-                    let mut lane_buffers = vec![Vec::with_capacity(codec::BLOCK_SIZE); stride];
+                    let mut lane_buffers = vec![Vec::with_capacity(block_size); stride];
                     // Buffered compressed blocks for each lane
                     let mut compressed_blocks = vec![Vec::new(); stride];
 
                     let mut reader = BufReader::with_capacity(2 * 1024 * 1024, file);
-                    let mut chunk = vec![0u8; codec::BLOCK_SIZE * stride];
+                    let mut chunk = vec![0u8; block_size * stride];
                     
                     let mut head = vec![-1i32; codec::LZV2_HASH_SIZE];
-                    let mut prev = vec![0i32; codec::LZV2_WINDOW_SIZE];
+                    let mut prev = vec![0i32; window_size];
 
                     let mut bytes_processed = 0;
                     loop {
-                        // Read up to BLOCK_SIZE * stride bytes
+                        // Read up to block_size * stride bytes
                         let mut chunk_len = 0;
                         while chunk_len < chunk.len() {
                             match reader.read(&mut chunk[chunk_len..]) {
@@ -502,9 +515,9 @@ pub fn create(
                                 
                                 // Check if lane buffers are full
                                 for s in 0..stride {
-                                    if lane_buffers[s].len() >= codec::BLOCK_SIZE {
+                                    if lane_buffers[s].len() >= block_size {
                                         head.fill(-1);
-                                        let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut head, &mut prev, FORMAT_VERSION);
+                                        let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut head, &mut prev, window_size, FORMAT_VERSION);
                                         let res = codec::encode_block_result(&lane_buffers[s], c_opt);
                                         compressed_blocks[s].push(res);
                                         lane_buffers[s].clear();
@@ -519,7 +532,7 @@ pub fn create(
                     for s in 0..stride {
                         if !lane_buffers[s].is_empty() {
                             head.fill(-1);
-                            let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut head, &mut prev, FORMAT_VERSION);
+                            let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut head, &mut prev, window_size, FORMAT_VERSION);
                             let res = codec::encode_block_result(&lane_buffers[s], c_opt);
                             compressed_blocks[s].push(res);
                             lane_buffers[s].clear();
@@ -1195,7 +1208,7 @@ mod tests {
 
         let archive = dir.join("out.bnc");
         let inputs = vec![src.to_string_lossy().into_owned()];
-        let stats = create(archive.to_str().unwrap(), &inputs, false).unwrap();
+        let stats = create(archive.to_str().unwrap(), &inputs, 1, false).unwrap();
         assert_eq!(stats.files, 3);
 
         // 1. Verify list entries (should read from CD)

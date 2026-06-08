@@ -31,6 +31,15 @@ COMMANDS:
     v, version                               Show version
 
 OPTIONS:
+    -1 ... -8            Compression levels (default: -1):
+                           -1: 64 KB window, 32 KB blocks (fastest)
+                           -2: 128 KB window, 128 KB blocks
+                           -3: 256 KB window, 256 KB blocks
+                           -4: 512 KB window, 512 KB blocks
+                           -5: 1 MB window, 1 MB blocks
+                           -6: 2 MB window, 2 MB blocks
+                           -7: 4 MB window, 4 MB blocks
+                           -8: 8 MB window, 8 MB blocks (strongest)
     -o, --output <dir>   Extract into <dir> (default: current directory)
     -c, --stdout         Write extracted file(s) to stdout instead of disk
     -f, --force          Overwrite existing files when extracting
@@ -55,6 +64,7 @@ struct Options {
     force: bool,
     verbose: bool,
     quiet: bool,
+    level: u8,
     positionals: Vec<String>,
 }
 
@@ -65,6 +75,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         force: false,
         verbose: false,
         quiet: false,
+        level: 1,
         positionals: Vec::new(),
     };
     let mut i = 0;
@@ -82,6 +93,14 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "-c" | "--stdout" => opts.to_stdout = true,
             "-v" | "--verbose" => opts.verbose = true,
             "-q" | "--quiet" => opts.quiet = true,
+            "-1" => opts.level = 1,
+            "-2" => opts.level = 2,
+            "-3" => opts.level = 3,
+            "-4" => opts.level = 4,
+            "-5" => opts.level = 5,
+            "-6" => opts.level = 6,
+            "-7" => opts.level = 7,
+            "-8" => opts.level = 8,
             _ if a.starts_with('-') && a.len() > 1 => {
                 return Err(format!("unknown option: {a}"));
             }
@@ -114,7 +133,7 @@ fn cmd_create(opts: &Options) -> Result<(), String> {
     let archive = &opts.positionals[0];
     let inputs = &opts.positionals[1..];
     let stats =
-        archive::create(archive, inputs, opts.verbose).map_err(|e| format!("create: {e}"))?;
+        archive::create(archive, inputs, opts.level, opts.verbose).map_err(|e| format!("create: {e}"))?;
     if !opts.quiet {
         let ratio = if stats.orig_total == 0 {
             0.0
