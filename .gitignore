@@ -3,3 +3,5 @@ Cargo.lock
 *.bnc
 /.tmp_build
 /.bin
+query_openrouter.py
+model_optimizations.md

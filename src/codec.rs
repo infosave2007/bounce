@@ -108,41 +108,181 @@ fn code_to_len(code: u8, extra: u16) -> u16 {
     LEN_CODE_TABLE[code as usize].0 + extra
 }
 
-#[derive(Debug, Clone)]
-struct FlatNode {
-    freq: usize,
-    sym: i16,
-    left: Option<usize>,
-    right: Option<usize>,
+fn package_merge_sorted_in_place(max_length: usize, num_codes: usize, a: &mut [usize]) -> usize {
+    if num_codes == 0 || max_length == 0 {
+        return 0;
+    }
+    if num_codes <= 2 {
+        a[0] = 1;
+        if num_codes == 2 {
+            a[1] = 1;
+        }
+        return 1;
+    }
+
+    if max_length > 63 {
+        return 0;
+    }
+
+    let encoding_limit = 1u64 << max_length;
+    if encoding_limit < num_codes as u64 {
+        return 0;
+    }
+
+    let max_buffer = 2 * num_codes;
+    let mut current = vec![0usize; max_buffer];
+    let mut previous = vec![0usize; max_buffer];
+    let mut is_merged = vec![0u64; max_buffer];
+
+    for i in 0..num_codes {
+        previous[i] = a[i];
+    }
+    let mut num_previous = num_codes;
+    let num_relevant = 2 * num_codes - 2;
+
+    let mut mask = 1u64;
+    for _bits in (1..max_length).rev() {
+        num_previous &= !1;
+
+        current[0] = a[0];
+        current[1] = a[1];
+        let mut sum = current[0] + current[1];
+
+        let mut num_current = 2;
+        let mut num_hist = num_current;
+        let mut num_merged = 0;
+
+        loop {
+            if num_hist < num_codes && a[num_hist] <= sum {
+                current[num_current] = a[num_hist];
+                num_current += 1;
+                num_hist += 1;
+                continue;
+            }
+
+            is_merged[num_current] |= mask;
+            current[num_current] = sum;
+            num_current += 1;
+            num_merged += 1;
+
+            if num_merged * 2 >= num_previous {
+                break;
+            }
+
+            sum = previous[num_merged * 2] + previous[num_merged * 2 + 1];
+        }
+
+        while num_hist < num_codes {
+            current[num_current] = a[num_hist];
+            num_current += 1;
+            num_hist += 1;
+        }
+
+        mask <<= 1;
+
+        if num_previous >= num_relevant {
+            let mut keep_going = false;
+            for i in (1..num_relevant).rev() {
+                if previous[i] != current[i] {
+                    keep_going = true;
+                    break;
+                }
+            }
+            if !keep_going {
+                break;
+            }
+        }
+
+        std::mem::swap(&mut previous, &mut current);
+        num_previous = num_current;
+    }
+
+    mask >>= 1;
+
+    for i in 0..num_codes {
+        a[i] = 0;
+    }
+
+    let mut num_analyze = num_relevant;
+    while mask != 0 {
+        let mut num_merged = 0;
+        a[0] += 1;
+        a[1] += 1;
+        let mut symbol = 2;
+
+        for i in symbol..num_analyze {
+            if (is_merged[i] & mask) == 0 {
+                a[symbol] += 1;
+                symbol += 1;
+            } else {
+                num_merged += 1;
+            }
+        }
+
+        num_analyze = 2 * num_merged;
+        mask >>= 1;
+    }
+
+    for i in 0..num_analyze {
+        a[i] += 1;
+    }
+
+    a[0]
+}
+
+struct KeyValue {
+    key: usize,
+    value: usize,
+}
+
+fn package_merge(
+    max_length: usize,
+    num_codes: usize,
+    histogram: &[usize],
+    code_lengths: &mut [u8],
+) -> usize {
+    for i in 0..num_codes {
+        code_lengths[i] = 0;
+    }
+
+    let mut num_nonzero = 0;
+    for i in 0..num_codes {
+        if histogram[i] != 0 {
+            num_nonzero += 1;
+        }
+    }
+
+    if num_nonzero == 0 {
+        return 0;
+    }
+
+    let mut mapping = Vec::with_capacity(num_nonzero);
+    for i in 0..num_codes {
+        if histogram[i] != 0 {
+            mapping.push(KeyValue {
+                key: histogram[i],
+                value: i,
+            });
+        }
+    }
+
+    mapping.sort_by_key(|kv| kv.key);
+
+    let mut sorted = Vec::with_capacity(num_nonzero);
+    for i in 0..num_nonzero {
+        sorted.push(mapping[i].key);
+    }
+
+    let result = package_merge_sorted_in_place(max_length, num_nonzero, &mut sorted);
+
+    for i in 0..num_nonzero {
+        code_lengths[mapping[i].value] = sorted[i] as u8;
+    }
+
+    result
 }
 
 const HUFF_UINT16_ALPHABET_SIZE: usize = 286;
-
-fn huff_assign_lengths(nodes: &[FlatNode], root_idx: usize, code_lens: &mut [u8], exceeded: &mut bool) {
-    let mut stack = Vec::with_capacity(64);
-    stack.push((root_idx, 0u8));
-    while let Some((idx, depth)) = stack.pop() {
-        let node = &nodes[idx];
-        if node.sym >= 0 {
-            let mut d = depth;
-            if d > 15 {
-                *exceeded = true;
-                d = 15;
-            }
-            if d == 0 {
-                d = 1;
-            }
-            code_lens[node.sym as usize] = d;
-        } else {
-            if let Some(right) = node.right {
-                stack.push((right, depth + 1));
-            }
-            if let Some(left) = node.left {
-                stack.push((left, depth + 1));
-            }
-        }
-    }
-}
 
 fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
     if data.len() < 256 {
@@ -167,58 +307,7 @@ fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
     }
 
     let mut code_lens = [0u8; HUFF_UINT16_ALPHABET_SIZE];
-    let mut exceeded = false;
-    use std::collections::BinaryHeap;
-    use std::cmp::Reverse;
-
-    for _attempt in 0..2 {
-        exceeded = false;
-        let mut nodes = Vec::with_capacity(unique_count * 2);
-        let mut heap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::with_capacity(unique_count);
-
-        for sym in 0..HUFF_UINT16_ALPHABET_SIZE {
-            if freq[sym] > 0 {
-                let idx = nodes.len();
-                nodes.push(FlatNode {
-                    freq: freq[sym],
-                    sym: sym as i16,
-                    left: None,
-                    right: None,
-                });
-                heap.push(Reverse((freq[sym], idx)));
-            }
-        }
-
-        while heap.len() > 1 {
-            let Reverse((f1, child1)) = heap.pop().unwrap();
-            let Reverse((f2, child2)) = heap.pop().unwrap();
-            let merged_freq = f1 + f2;
-            let merged_idx = nodes.len();
-            nodes.push(FlatNode {
-                freq: merged_freq,
-                sym: -1,
-                left: Some(child1),
-                right: Some(child2),
-            });
-            heap.push(Reverse((merged_freq, merged_idx)));
-        }
-        let active_root = heap.pop().unwrap().0.1;
-
-        code_lens = [0u8; HUFF_UINT16_ALPHABET_SIZE];
-        huff_assign_lengths(&nodes, active_root, &mut code_lens, &mut exceeded);
-
-        if !exceeded {
-            break;
-        }
-
-        let total_weight: usize = freq.iter().sum();
-        let floor = total_weight / 500 + 1;
-        for i in 0..HUFF_UINT16_ALPHABET_SIZE {
-            if freq[i] > 0 {
-                freq[i] += floor;
-            }
-        }
-    }
+    package_merge(15, HUFF_UINT16_ALPHABET_SIZE, &freq, &mut code_lens);
 
     let mut bl_count = [0usize; 16];
     let mut max_bits = 0;
@@ -454,58 +543,7 @@ fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
     }
 
     let mut code_lens = [0u8; HUFF_ALPHABET_SIZE];
-    let mut exceeded = false;
-    use std::collections::BinaryHeap;
-    use std::cmp::Reverse;
-
-    for _attempt in 0..2 {
-        exceeded = false;
-        let mut nodes = Vec::with_capacity(unique_count * 2);
-        let mut heap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::with_capacity(unique_count);
-
-        for sym in 0..HUFF_ALPHABET_SIZE {
-            if freq[sym] > 0 {
-                let idx = nodes.len();
-                nodes.push(FlatNode {
-                    freq: freq[sym],
-                    sym: sym as i16,
-                    left: None,
-                    right: None,
-                });
-                heap.push(Reverse((freq[sym], idx)));
-            }
-        }
-
-        while heap.len() > 1 {
-            let Reverse((f1, child1)) = heap.pop().unwrap();
-            let Reverse((f2, child2)) = heap.pop().unwrap();
-            let merged_freq = f1 + f2;
-            let merged_idx = nodes.len();
-            nodes.push(FlatNode {
-                freq: merged_freq,
-                sym: -1,
-                left: Some(child1),
-                right: Some(child2),
-            });
-            heap.push(Reverse((merged_freq, merged_idx)));
-        }
-        let active_root = heap.pop().unwrap().0.1;
-
-        code_lens = [0u8; HUFF_ALPHABET_SIZE];
-        huff_assign_lengths(&nodes, active_root, &mut code_lens, &mut exceeded);
-
-        if !exceeded {
-            break;
-        }
-
-        let total_weight: usize = freq.iter().sum();
-        let floor = total_weight / 500 + 1;
-        for i in 0..HUFF_ALPHABET_SIZE {
-            if freq[i] > 0 {
-                freq[i] += floor;
-            }
-        }
-    }
+    package_merge(15, HUFF_ALPHABET_SIZE, &freq, &mut code_lens);
 
     let mut bl_count = [0usize; 16];
     let mut max_bits = 0;
