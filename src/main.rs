@@ -133,7 +133,7 @@ fn cmd_create(opts: &Options) -> Result<(), String> {
     let archive = &opts.positionals[0];
     let inputs = &opts.positionals[1..];
     let stats =
-        archive::create(archive, inputs, opts.level, opts.verbose).map_err(|e| format!("create: {e}"))?;
+        archive::create(archive, inputs, opts.level, opts.verbose, !opts.quiet).map_err(|e| format!("create: {e}"))?;
     if !opts.quiet {
         let ratio = if stats.orig_total == 0 {
             0.0

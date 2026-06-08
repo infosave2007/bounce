@@ -224,6 +224,47 @@ fn walk_dir(dir: &Path, base: &Path, out: &mut Vec<InputFile>) -> io::Result<()>
 
 // ── Metadata helpers ────────────────────────────────────────────────────────
 
+fn format_duration(secs: u64) -> String {
+    let m = secs / 60;
+    let s = secs % 60;
+    if m > 0 { format!("{:02}:{:02}", m, s) } else { format!("{}s", s) }
+}
+
+fn print_progress(
+    file_name: &str,
+    bytes_processed: u64,
+    file_size: u64,
+    stored_size: u64,
+    start_time: std::time::Instant,
+) {
+    let elapsed = start_time.elapsed().as_secs_f64();
+    if elapsed < 0.1 || bytes_processed == 0 { return; }
+
+    let speed = bytes_processed as f64 / elapsed;
+    let speed_mb = speed / 1_048_576.0;
+    
+    let eta_secs = if speed > 0.0 && file_size > bytes_processed {
+        ((file_size - bytes_processed) as f64 / speed) as u64
+    } else {
+        0
+    };
+    
+    let pct = if file_size == 0 { 0.0 } else { bytes_processed as f64 / file_size as f64 * 100.0 };
+    let ratio = if bytes_processed == 0 { 0.0 } else { stored_size as f64 / bytes_processed as f64 * 100.0 };
+    
+    eprint!(
+        "\r\x1b[K  [{}] compressing {}: {:.1} / {:.1} MB ({:.1}%) | {:.1} MB/s | Ratio: {:.1}%",
+        format_duration(eta_secs),
+        file_name,
+        bytes_processed as f64 / 1_048_576.0,
+        file_size as f64 / 1_048_576.0,
+        pct,
+        speed_mb,
+        ratio
+    );
+    let _ = std::io::stderr().flush();
+}
+
 fn file_mode(meta: &fs::Metadata) -> u32 {
     #[cfg(unix)]
     {
@@ -254,11 +295,17 @@ fn compress_stream_blocked<R: Read, W: Write, T: codec::TableIndex>(
     crc: &mut u32,
     orig_size: &mut u64,
     num_blocks: &mut u32,
+    show_progress: bool,
+    file_name: &str,
+    file_size: u64,
 ) -> io::Result<()> {
     let mut buffer = vec![0u8; block_size];
     let mut head = vec![T::SENTINEL; codec::LZV2_HASH_SIZE];
     let mut prev = vec![T::SENTINEL; window_size];
     let mut buffers = codec::CompressBuffers::new();
+
+    let start_time = std::time::Instant::now();
+    let mut stored_size = 0u64;
 
     loop {
         let mut block_len = 0;
@@ -278,11 +325,19 @@ fn compress_stream_blocked<R: Read, W: Write, T: codec::TableIndex>(
         *crc = crc32_update(*crc, block);
         *orig_size += block_len as u64;
 
-        // head.fill(T::SENTINEL);
         let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version);
         let res = codec::encode_block_result(block, c_opt);
         w.write_all(&res)?;
+        stored_size += res.len() as u64;
+        
+        if show_progress {
+            print_progress(file_name, *orig_size, file_size, stored_size, start_time);
+        }
+
         *num_blocks += 1;
+    }
+    if show_progress {
+        eprint!("\r\x1b[K"); // Clear the line when done
     }
     Ok(())
 }
@@ -298,6 +353,8 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
     crc: &mut u32,
     orig_size: &mut u64,
     num_blocks: &mut u32,
+    show_progress: bool,
+    file_name: &str,
 ) -> io::Result<()> {
     let groups = (file_size as usize) / stride;
     let mut prev_byte = [0u8; 4];
@@ -312,6 +369,8 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
     let mut prevs = vec![vec![T::SENTINEL; window_size]; stride];
     let mut buffers = codec::CompressBuffers::new();
 
+    let start_time = std::time::Instant::now();
+    let mut stored_size = 0u64;
     let mut bytes_processed = 0;
     loop {
         // Read up to block_size * stride bytes
@@ -357,6 +416,7 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
                     if lane_buffers[s].len() >= block_size {
                         let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut heads[s], &mut prevs[s], &mut buffers, window_size, format_version);
                         let res = codec::encode_block_result(&lane_buffers[s], c_opt);
+                        stored_size += res.len() as u64;
                         compressed_blocks[s].push(res);
                         lane_buffers[s].clear();
                     }
@@ -364,6 +424,10 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
             }
         }
         bytes_processed += chunk_len;
+
+        if show_progress {
+            print_progress(file_name, bytes_processed as u64, file_size, stored_size, start_time);
+        }
     }
 
     // Compress any remaining bytes in lane buffers
@@ -400,6 +464,7 @@ pub fn create(
     inputs: &[String],
     level: u8,
     verbose: bool,
+    show_progress: bool,
 ) -> io::Result<CreateStats> {
     let files = collect_inputs(inputs)?;
     if files.is_empty() {
@@ -448,7 +513,7 @@ pub fn create(
             for f in chunk {
                 let meta = fs::metadata(&f.abs)?;
                 let file_size = meta.len();
-                if file_size < 512 * 1024 * 1024 {
+                if file_size < 128 * 1024 * 1024 {
                     let abs_path = f.abs.clone();
                     let handle = s.spawn(move || -> io::Result<Option<(Vec<u8>, Vec<u8>, u32, u8, bool)>> {
                         let data = fs::read(&abs_path)?;
@@ -580,6 +645,9 @@ pub fn create(
                             &mut crc,
                             &mut orig_size,
                             &mut num_blocks,
+                            show_progress,
+                            &f.rel,
+                            file_size,
                         )?;
                     } else {
                         let stride = if method == codec::CompressMethod::ShuffleBlk { 4 } else { 2 };
@@ -595,6 +663,8 @@ pub fn create(
                             &mut crc,
                             &mut orig_size,
                             &mut num_blocks,
+                            show_progress,
+                            &f.rel,
                         )?;
                     }
                 } else {
@@ -609,6 +679,9 @@ pub fn create(
                             &mut crc,
                             &mut orig_size,
                             &mut num_blocks,
+                            show_progress,
+                            &f.rel,
+                            file_size,
                         )?;
                     } else {
                         let stride = if method == codec::CompressMethod::ShuffleBlk { 4 } else { 2 };
@@ -624,6 +697,8 @@ pub fn create(
                             &mut crc,
                             &mut orig_size,
                             &mut num_blocks,
+                            show_progress,
+                            &f.rel,
                         )?;
                     }
                 }
