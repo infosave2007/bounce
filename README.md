@@ -158,7 +158,7 @@ bash bounce/benchmark.sh --only-bounce
 
 | Tool | Size | Ratio | C (Compression) | D (Decompression) |
 |------|-----:|------:|----------------:|------------------:|
-| **bounce** | 466,947 | 33.8% | 17.6 MB/s | 36.6 MB/s |
+| **bounce** | 466,947 | 33.8% | 19.1 MB/s | 37.4 MB/s |
 | gzip -9 | 404,664 | 29.3% | 15.3 MB/s | 37.2 MB/s |
 | lz4 -9 | 456,579 | 33.1% | 2.7 MB/s | 36.9 MB/s |
 | zstd -19 | 45,772 | 3.3% | 3.3 MB/s | 36.2 MB/s |
@@ -170,7 +170,7 @@ bash bounce/benchmark.sh --only-bounce
 
 | Tool | Size | Ratio | C (Compression) | D (Decompression) |
 |------|-----:|------:|----------------:|------------------:|
-| **bounce** | 100,126 | 18.9% | 4.6 MB/s | 13.8 MB/s |
+| **bounce** | 100,126 | 18.9% | 4.7 MB/s | 14.1 MB/s |
 | gzip -9 | 101,897 | 19.2% | 10.2 MB/s | 14.2 MB/s |
 | lz4 -9 | 122,076 | 23.0% | 11.2 MB/s | 13.8 MB/s |
 | zstd -19 | 84,994 | 16.0% | 4.6 MB/s | 13.8 MB/s |
@@ -184,7 +184,7 @@ Quantized weights are close to random data—serving as an honest test on a larg
 
 | Tool | Size | Ratio | C (Compression) | D (Decompression) |
 |------|-----:|------:|----------------:|------------------:|
-| **bounce** | 1,066,254,392 | 99.3% | 93.2 MB/s | **1313.6 MB/s** |
+| **bounce** | 1,066,254,392 | 99.3% | 152.2 MB/s | **1435.2 MB/s** |
 | gzip -9 | 1,063,316,152 | 99.0% | 42.2 MB/s | 513.4 MB/s |
 | lz4 -9 | 1,066,181,306 | 99.3% | 214.9 MB/s | **3435.4 MB/s** |
 | zstd -19 -T0 | 1,060,561,565 | 98.8% | 21.0 MB/s | 1247.8 MB/s |
@@ -205,7 +205,7 @@ Quantized weights are close to random data—serving as an honest test on a larg
 
 **Honest Conclusions:**
 
-- **Decompression:** Native ARM64 decompression of `bounce` reaches **~1.31 GB/s** on large payloads. While this is a massive speedup compared to Rosetta emulation, it remains slower than highly optimized native-speed streaming engines like `lz4` and `brotli` (which reach 3-4 GB/s natively) due to the overhead of per-block Huffman decoding and full-file CRC-32 verification.
+- **Decompression:** Native ARM64 decompression of `bounce` reaches **~1.43 GB/s** on large payloads. While this is a massive speedup compared to Rosetta emulation, it remains slower than highly optimized native-speed streaming engines like `lz4` and `brotli` (which reach 3-4 GB/s natively) due to the overhead of per-block Huffman decoding and full-file CRC-32 verification.
 - **Compression:** On large binary data, `bounce` is fast (due to parallelized blocks and automatic method routing) but limits duplicates to a 64 KB window. Hence, on files with long-range duplicates (e.g., 500 MB text), it achieves 33.8% ratio while large-dictionary tools (`zstd`, `xz`, `brotli`) compress it to nearly zero.
 - **Safety:** On incompressible inputs, `bounce` guarantees that files do not bloat by falling back to `stored` (raw payload) mode.
 

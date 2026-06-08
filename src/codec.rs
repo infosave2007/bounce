@@ -123,7 +123,7 @@ fn huff_assign_lengths(nodes: &[FlatNode], node_idx: usize, depth: u8, code_lens
 }
 
 fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
-    if data.len() < 32 {
+    if data.len() < 256 {
         return None;
     }
 
@@ -412,7 +412,7 @@ const HUFF_ALPHABET_SIZE: usize = 256;
 
 
 fn huff_encode(data: &[u8]) -> Option<Vec<u8>> {
-    if data.len() < 64 {
+    if data.len() < 256 {
         return None;
     }
 
@@ -628,10 +628,19 @@ const LZV2_MAX_MATCH: usize = 258;
 const LZV2_MAX_CHAIN: usize = 256;
 
 fn lzv2_hash(data: &[u8], pos: usize) -> u32 {
-    if pos + 2 >= data.len() {
-        return 0;
+    if pos + 3 >= data.len() {
+        let mut val = 0u32;
+        let rem = data.len() - pos;
+        if rem >= 3 {
+            val = (data[pos] as u32) | ((data[pos + 1] as u32) << 8) | ((data[pos + 2] as u32) << 16);
+        } else if rem == 2 {
+            val = (data[pos] as u32) | ((data[pos + 1] as u32) << 8);
+        } else if rem == 1 {
+            val = data[pos] as u32;
+        }
+        return val.wrapping_mul(0x1E35A7BD) >> (32 - LZV2_HASH_BITS);
     }
-    let val = (data[pos] as u32) | ((data[pos + 1] as u32) << 8) | ((data[pos + 2] as u32) << 16);
+    let val = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
     val.wrapping_mul(0x1E35A7BD) >> (32 - LZV2_HASH_BITS)
 }
 
@@ -1048,26 +1057,35 @@ fn deflate_blocked_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, S
             decode_block_into(slot, comp, *orig, *flag)?;
         }
     } else {
-        let err: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+        let has_error = std::sync::atomic::AtomicBool::new(false);
         let chunk_size = (work.len() + threads - 1) / threads;
-        let err_ref = &err;
-        std::thread::scope(|s| {
+        let has_error_ref = &has_error;
+        let results = std::thread::scope(|s| {
+            let mut handles = Vec::new();
             for chunk in work.chunks_mut(chunk_size) {
-                s.spawn(move || {
+                let handle = s.spawn(move || -> Result<(), String> {
                     for (slot, comp, orig, flag) in chunk.iter_mut() {
-                        if err_ref.lock().unwrap().is_some() {
-                            return;
+                        if has_error_ref.load(std::sync::atomic::Ordering::Relaxed) {
+                            return Ok(());
                         }
                         if let Err(e) = decode_block_into(slot, comp, *orig, *flag) {
-                            *err_ref.lock().unwrap() = Some(e);
-                            return;
+                            has_error_ref.store(true, std::sync::atomic::Ordering::Relaxed);
+                            return Err(e);
                         }
                     }
+                    Ok(())
                 });
+                handles.push(handle);
             }
+            handles.into_iter().map(|h| h.join()).collect::<Vec<_>>()
         });
-        if let Some(e) = err.into_inner().unwrap() {
-            return Err(e);
+
+        for res in results {
+            match res {
+                Ok(Err(e)) => return Err(e),
+                Err(any) => return Err(format!("Thread panicked: {:?}", any)),
+                _ => {}
+            }
         }
     }
 
