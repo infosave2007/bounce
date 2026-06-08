@@ -232,21 +232,28 @@ fn huff_assign_lengths(
 
     let root = heap.pop().1 as usize;
 
-    fn assign_depths(nodes: &[FlatNode], curr: usize, depth: u8, code_lens: &mut [u8]) {
-        let node = &nodes[curr];
+    let mut stack = [(0u16, 0u8); 576];
+    let mut stack_len = 0;
+    stack[stack_len] = (root as u16, 0);
+    stack_len += 1;
+
+    while stack_len > 0 {
+        stack_len -= 1;
+        let (curr_idx, depth) = stack[stack_len];
+        let node = &nodes[curr_idx as usize];
         if node.sym >= 0 {
             code_lens[node.sym as usize] = depth;
         } else {
-            if let Some(left) = node.left {
-                assign_depths(nodes, left as usize, depth + 1, code_lens);
-            }
             if let Some(right) = node.right {
-                assign_depths(nodes, right as usize, depth + 1, code_lens);
+                stack[stack_len] = (right, depth + 1);
+                stack_len += 1;
+            }
+            if let Some(left) = node.left {
+                stack[stack_len] = (left, depth + 1);
+                stack_len += 1;
             }
         }
     }
-
-    assign_depths(&nodes[..nodes_len], root, 0, code_lens);
 
     let mut bl_count = [0usize; 288];
     let mut max_len = 0;
@@ -454,7 +461,7 @@ fn decode_code_lens(encoded: &[u8], out: &mut [u8]) -> Result<(), String> {
 
 const HUFF_UINT16_ALPHABET_SIZE: usize = 286;
 
-fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
+fn huff_encode_uint16(data: &[u16], version: u8) -> Option<Vec<u8>> {
     if data.len() < 256 {
         return None;
     }
@@ -509,9 +516,15 @@ fn huff_encode_uint16(data: &[u16]) -> Option<Vec<u8>> {
     }
 
     let rle_data = encode_code_lens(&code_lens);
-    let mut out = Vec::with_capacity(data.len() + 2 + rle_data.len());
+    let mut out = Vec::with_capacity(data.len() + 3 + rle_data.len());
     out.push(max_bits as u8);
-    out.push(rle_data.len() as u8);
+    if version >= 2 {
+        let len_bytes = (rle_data.len() as u16).to_le_bytes();
+        out.push(len_bytes[0]);
+        out.push(len_bytes[1]);
+    } else {
+        out.push(rle_data.len() as u8);
+    }
     out.extend_from_slice(&rle_data);
 
     let mut bit_buf = 0u64;
@@ -562,7 +575,11 @@ impl<'a> BitReader<'a> {
             if bytes_to_take > 0 && self.idx + 8 <= self.data.len() {
                 let v = u64::from_be_bytes(self.data[self.idx..self.idx + 8].try_into().unwrap());
                 let shift = 64 - bytes_to_take * 8;
-                self.bit_buf = (self.bit_buf << (bytes_to_take * 8)) | (v >> shift);
+                if bytes_to_take == 8 {
+                    self.bit_buf = v;
+                } else {
+                    self.bit_buf = (self.bit_buf << (bytes_to_take * 8)) | (v >> shift);
+                }
                 self.bits_left += bytes_to_take * 8;
                 self.idx += bytes_to_take;
             } else {
@@ -586,9 +603,17 @@ impl<'a> BitReader<'a> {
             return 0;
         }
         if self.bits_left >= n {
-            ((self.bit_buf >> (self.bits_left - n)) & ((1 << n) - 1)) as u32
+            let shift_amt = self.bits_left - n;
+            let val = if shift_amt >= 64 {
+                0
+            } else {
+                self.bit_buf >> shift_amt
+            };
+            let mask = if n >= 64 { !0 } else { (1u64 << n) - 1 };
+            (val & mask) as u32
         } else {
-            ((self.bit_buf & ((1 << self.bits_left) - 1)) << (n - self.bits_left)) as u32
+            let mask = if self.bits_left >= 64 { !0 } else { (1u64 << self.bits_left) - 1 };
+            ((self.bit_buf & mask) << (n - self.bits_left)) as u32
         }
     }
 
@@ -596,32 +621,39 @@ impl<'a> BitReader<'a> {
     fn consume(&mut self, n: usize) {
         if self.bits_left >= n {
             self.bits_left -= n;
-            self.bit_buf &= (1 << self.bits_left) - 1;
         } else {
             self.bits_left = 0;
-            self.bit_buf = 0;
         }
     }
 }
 
-fn huff_decode_uint16(data: &[u8], expected_len: usize) -> Result<Vec<u16>, String> {
-    if data.len() < 2 {
-        return Err("huffUint16: data too short for header".to_string());
-    }
+fn huff_decode_uint16(data: &[u8], expected_len: usize, version: u8) -> Result<Vec<u16>, String> {
+    let (max_bits, _rle_len, header_len, start_idx) = if version >= 2 {
+        if data.len() < 3 {
+            return Err("huffUint16: data too short for header".to_string());
+        }
+        let max_bits = data[0] as usize;
+        let rle_len = u16::from_le_bytes([data[1], data[2]]) as usize;
+        (max_bits, rle_len, 3 + rle_len, 3)
+    } else {
+        if data.len() < 2 {
+            return Err("huffUint16: data too short for header".to_string());
+        }
+        let max_bits = data[0] as usize;
+        let rle_len = data[1] as usize;
+        (max_bits, rle_len, 2 + rle_len, 2)
+    };
 
-    let max_bits = data[0] as usize;
     if max_bits > 15 || max_bits == 0 {
         return Err(format!("huffUint16: invalid maxBits {}", max_bits));
     }
 
-    let rle_len = data[1] as usize;
-    let header_len = 2 + rle_len;
     if data.len() < header_len {
         return Err("huffUint16: data too short for RLE header".to_string());
     }
 
     let mut code_lens = [0u8; HUFF_UINT16_ALPHABET_SIZE];
-    decode_code_lens(&data[2..header_len], &mut code_lens)?;
+    decode_code_lens(&data[start_idx..header_len], &mut code_lens)?;
     let bitstream = &data[header_len..];
 
     let mut bl_count = [0usize; 16];
@@ -948,15 +980,20 @@ fn match_len_u64(data: &[u8], p: usize, i: usize, limit: usize) -> usize {
 }
 
 fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
+    deflate_style_encode_with_version(data, 2)
+}
+
+pub fn deflate_style_encode_with_version(data: &[u8], version: u8) -> Option<Vec<u8>> {
     let mut head = vec![-1i32; LZV2_HASH_SIZE];
     let mut prev = vec![0i32; LZV2_WINDOW_SIZE];
-    deflate_style_encode_with_buffers(data, &mut head, &mut prev)
+    deflate_style_encode_with_buffers(data, &mut head, &mut prev, version)
 }
 
 pub(crate) fn deflate_style_encode_with_buffers(
     data: &[u8],
     head: &mut [i32],
     prev: &mut [i32],
+    version: u8,
 ) -> Option<Vec<u8>> {
     let n = data.len();
     if n < 128 {
@@ -1123,7 +1160,7 @@ pub(crate) fn deflate_style_encode_with_buffers(
         extra_bits.push((extra_buf << (8 - extra_buf_len)) as u8);
     }
 
-    let sym_comp = huff_encode_uint16(&symbols)?;
+    let sym_comp = huff_encode_uint16(&symbols, version)?;
     let mut dist_comp = Vec::new();
     if !dist_codes.is_empty() {
         if let Some(comp) = huff_encode(&dist_codes) {
@@ -1153,6 +1190,10 @@ pub(crate) fn deflate_style_encode_with_buffers(
 }
 
 pub(crate) fn deflate_style_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
+    deflate_style_decode_with_version(data, expected_len, 2)
+}
+
+pub(crate) fn deflate_style_decode_with_version(data: &[u8], expected_len: usize, version: u8) -> Result<Vec<u8>, String> {
     if data.len() < 20 {
         return Err("deflateStyle: too short".to_string());
     }
@@ -1168,7 +1209,7 @@ pub(crate) fn deflate_style_decode(data: &[u8], expected_len: usize) -> Result<V
     }
 
     let sym_cd = &data[20..20 + sym_comp_sz];
-    let symbols = huff_decode_uint16(sym_cd, num_syms)?;
+    let symbols = huff_decode_uint16(sym_cd, num_syms, version)?;
 
     let dist_start = 20 + sym_comp_sz;
     if dist_start + dist_comp_sz > data.len() {
@@ -1350,6 +1391,10 @@ pub(crate) fn encode_block_result(block: &[u8], c_opt: Option<Vec<u8>>) -> Vec<u
 }
 
 fn deflate_blocked_encode(data: &[u8]) -> Option<Vec<u8>> {
+    deflate_blocked_encode_with_version(data, 2)
+}
+
+pub fn deflate_blocked_encode_with_version(data: &[u8], version: u8) -> Option<Vec<u8>> {
     let n = data.len();
     if n < 128 {
         return None;
@@ -1371,7 +1416,7 @@ fn deflate_blocked_encode(data: &[u8]) -> Option<Vec<u8>> {
             let end = std::cmp::min(start + BLOCK_SIZE, n);
             let block = &data[start..end];
             head.fill(-1);
-            let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev);
+            let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, version);
             let res = encode_block_result(block, c_opt);
             encoded_blocks[b].write(res);
         }
@@ -1391,7 +1436,7 @@ fn deflate_blocked_encode(data: &[u8]) -> Option<Vec<u8>> {
                         let block_end = std::cmp::min(block_start + BLOCK_SIZE, n);
                         let block = &data[block_start..block_end];
                         head.fill(-1);
-                        let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev);
+                        let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, version);
                         let res = encode_block_result(block, c_opt);
                         slot.write(res);
                     }
@@ -1423,6 +1468,10 @@ fn deflate_blocked_encode(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn deflate_blocked_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
+    deflate_blocked_decode_with_version(data, expected_len, 2)
+}
+
+fn deflate_blocked_decode_with_version(data: &[u8], expected_len: usize, version: u8) -> Result<Vec<u8>, String> {
     if data.len() < 4 {
         return Err("blocked: too short".to_string());
     }
@@ -1474,7 +1523,7 @@ fn deflate_blocked_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, S
     let threads = num_threads(work.len());
     if threads <= 1 {
         for (slot, comp, orig, flag) in work.iter_mut() {
-            decode_block_into(slot, comp, *orig, *flag)?;
+            decode_block_into_with_version(slot, comp, *orig, *flag, version)?;
         }
     } else {
         let has_error = std::sync::atomic::AtomicBool::new(false);
@@ -1488,7 +1537,7 @@ fn deflate_blocked_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, S
                         if has_error_ref.load(std::sync::atomic::Ordering::Relaxed) {
                             return Ok(());
                         }
-                        if let Err(e) = decode_block_into(slot, comp, *orig, *flag) {
+                        if let Err(e) = decode_block_into_with_version(slot, comp, *orig, *flag, version) {
                             has_error_ref.store(true, std::sync::atomic::Ordering::Relaxed);
                             return Err(e);
                         }
@@ -1513,14 +1562,14 @@ fn deflate_blocked_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, S
 }
 
 #[inline]
-fn decode_block_into(slot: &mut [u8], comp: &[u8], orig: usize, flag: u8) -> Result<(), String> {
+fn decode_block_into_with_version(slot: &mut [u8], comp: &[u8], orig: usize, flag: u8, version: u8) -> Result<(), String> {
     if flag == 0 {
         if comp.len() != orig {
             return Err("blocked: raw block size mismatch".to_string());
         }
         slot.copy_from_slice(comp);
     } else {
-        let decoded = deflate_style_decode(comp, orig)?;
+        let decoded = deflate_style_decode_with_version(comp, orig, version)?;
         slot.copy_from_slice(&decoded);
     }
     Ok(())
@@ -1744,6 +1793,10 @@ fn estimate_entropy(data: &[u8]) -> f64 {
 }
 
 pub fn smart_compress(data: &[u8]) -> Option<(Vec<u8>, CompressMethod)> {
+    smart_compress_with_version(data, 2)
+}
+
+pub fn smart_compress_with_version(data: &[u8], version: u8) -> Option<(Vec<u8>, CompressMethod)> {
     let n = data.len();
     if n < 128 {
         return None;
@@ -1772,16 +1825,16 @@ pub fn smart_compress(data: &[u8]) -> Option<(Vec<u8>, CompressMethod)> {
         let mut shuf2_blk_cand = None;
 
         std::thread::scope(|s| {
-            let h1 = s.spawn(|| deflate_blocked_encode(data));
+            let h1 = s.spawn(|| deflate_blocked_encode_with_version(data, version));
             let h2 = if !skip_shuffle {
                 let shuf4 = byte_shuffle(data, 4);
-                Some(s.spawn(move || deflate_blocked_encode(&shuf4)))
+                Some(s.spawn(move || deflate_blocked_encode_with_version(&shuf4, version)))
             } else {
                 None
             };
             let h3 = if !skip_shuffle {
                 let shuf2 = byte_shuffle(data, 2);
-                Some(s.spawn(move || deflate_blocked_encode(&shuf2)))
+                Some(s.spawn(move || deflate_blocked_encode_with_version(&shuf2, version)))
             } else {
                 None
             };
@@ -1809,34 +1862,34 @@ pub fn smart_compress(data: &[u8]) -> Option<(Vec<u8>, CompressMethod)> {
         let mut shuf2_blk_cand = None;
 
         std::thread::scope(|s| {
-            let h_plain = s.spawn(|| deflate_style_encode(data));
+            let h_plain = s.spawn(|| deflate_style_encode_with_version(data, version));
             let h_shuf = if !skip_shuffle {
                 let shuf4 = byte_shuffle(data, 4);
-                Some(s.spawn(move || deflate_style_encode(&shuf4)))
+                Some(s.spawn(move || deflate_style_encode_with_version(&shuf4, version)))
             } else {
                 None
             };
             let h_shuf2 = if !skip_shuffle {
                 let shuf2 = byte_shuffle(data, 2);
-                Some(s.spawn(move || deflate_style_encode(&shuf2)))
+                Some(s.spawn(move || deflate_style_encode_with_version(&shuf2, version)))
             } else {
                 None
             };
 
             let h_blk = if n >= BLOCK_SIZE {
-                Some(s.spawn(move || deflate_blocked_encode(data)))
+                Some(s.spawn(move || deflate_blocked_encode_with_version(data, version)))
             } else {
                 None
             };
             let h_shuf_blk = if n >= BLOCK_SIZE && !skip_shuffle {
                 let shuf4 = byte_shuffle(data, 4);
-                Some(s.spawn(move || deflate_blocked_encode(&shuf4)))
+                Some(s.spawn(move || deflate_blocked_encode_with_version(&shuf4, version)))
             } else {
                 None
             };
             let h_shuf2_blk = if n >= BLOCK_SIZE && !skip_shuffle {
                 let shuf2 = byte_shuffle(data, 2);
-                Some(s.spawn(move || deflate_blocked_encode(&shuf2)))
+                Some(s.spawn(move || deflate_blocked_encode_with_version(&shuf2, version)))
             } else {
                 None
             };
@@ -1871,23 +1924,27 @@ pub fn smart_compress(data: &[u8]) -> Option<(Vec<u8>, CompressMethod)> {
 }
 
 pub fn smart_decompress(data: &[u8], method: CompressMethod, expected_len: usize) -> Result<Vec<u8>, String> {
+    smart_decompress_with_version(data, method, expected_len, 2)
+}
+
+pub fn smart_decompress_with_version(data: &[u8], method: CompressMethod, expected_len: usize, version: u8) -> Result<Vec<u8>, String> {
     match method {
-        CompressMethod::Plain => deflate_style_decode(data, expected_len),
-        CompressMethod::Blocked => deflate_blocked_decode(data, expected_len),
+        CompressMethod::Plain => deflate_style_decode_with_version(data, expected_len, version),
+        CompressMethod::Blocked => deflate_blocked_decode_with_version(data, expected_len, version),
         CompressMethod::Shuffle => {
-            let decoded = deflate_style_decode(data, expected_len)?;
+            let decoded = deflate_style_decode_with_version(data, expected_len, version)?;
             Ok(byte_unshuffle(&decoded, 4))
         }
         CompressMethod::ShuffleBlk => {
-            let decoded = deflate_blocked_decode(data, expected_len)?;
+            let decoded = deflate_blocked_decode_with_version(data, expected_len, version)?;
             Ok(byte_unshuffle(&decoded, 4))
         }
         CompressMethod::Shuffle2 => {
-            let decoded = deflate_style_decode(data, expected_len)?;
+            let decoded = deflate_style_decode_with_version(data, expected_len, version)?;
             Ok(byte_unshuffle(&decoded, 2))
         }
         CompressMethod::Shuffle2Blk => {
-            let decoded = deflate_blocked_decode(data, expected_len)?;
+            let decoded = deflate_blocked_decode_with_version(data, expected_len, version)?;
             Ok(byte_unshuffle(&decoded, 2))
         }
     }
@@ -1940,6 +1997,7 @@ pub struct DecompressReader<R: Read + Seek> {
     stored_size: u64,
     orig_size: u64,
     stored_raw: bool,
+    version: u8,
     state: DecompressState,
 }
 
@@ -1950,6 +2008,7 @@ impl<R: Read + Seek> DecompressReader<R> {
         stored_size: u64,
         orig_size: u64,
         stored_raw: bool,
+        version: u8,
     ) -> Self {
         Self {
             inner,
@@ -1957,6 +2016,7 @@ impl<R: Read + Seek> DecompressReader<R> {
             stored_size,
             orig_size,
             stored_raw,
+            version,
             state: DecompressState::Uninitialized,
         }
     }
@@ -1978,7 +2038,7 @@ impl<R: Read + Seek> DecompressReader<R> {
                 let mut payload = vec![0u8; self.stored_size as usize];
                 self.inner.read_exact(&mut payload)?;
 
-                let decoded = smart_decompress(&payload, self.method, self.orig_size as usize)
+                let decoded = smart_decompress_with_version(&payload, self.method, self.orig_size as usize, self.version)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
                 self.state = DecompressState::Buffered {
@@ -2111,7 +2171,7 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                     self.inner.read_exact(&mut comp_buf[..comp_size])?;
 
                     let decoded_block = if flag == 1 {
-                        deflate_style_decode(&comp_buf[..comp_size], orig_size)
+                        deflate_style_decode_with_version(&comp_buf[..comp_size], orig_size, self.version)
                             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                     } else {
                         comp_buf[..comp_size].to_vec()
@@ -2177,7 +2237,7 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                         self.inner.read_exact(&mut comp_buf[..comp_size])?;
 
                         let decoded_block = if flag == 1 {
-                            deflate_style_decode(&comp_buf[..comp_size], orig_size)
+                            deflate_style_decode_with_version(&comp_buf[..comp_size], orig_size, self.version)
                                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                         } else {
                             comp_buf[..comp_size].to_vec()
@@ -2276,4 +2336,60 @@ mod tests {
         roundtrip(&rng_data);
         roundtrip(&compressible_data);
     }
+
+    #[test]
+    fn test_huff_assign_lengths_edge_cases() {
+        // Case 1: 0 unique symbols
+        let mut code_lens = [0u8; 286];
+        let freq = [0usize; 286];
+        huff_assign_lengths(15, 286, &freq, &mut code_lens);
+        assert!(code_lens.iter().all(|&l| l == 0));
+
+        // Case 2: 1 unique symbol
+        let mut code_lens = [0u8; 286];
+        let mut freq = [0usize; 286];
+        freq[42] = 100;
+        huff_assign_lengths(15, 286, &freq, &mut code_lens);
+        assert_eq!(code_lens[42], 1);
+        assert!(code_lens.iter().enumerate().all(|(idx, &l)| idx == 42 || l == 0));
+
+        // Case 3: Fibonacci frequencies (causing a very deep tree, up to 45 symbols to avoid usize overflow)
+        let mut code_lens = [0u8; 286];
+        let mut freq = [0usize; 286];
+        freq[0] = 1;
+        freq[1] = 1;
+        for i in 2..45 {
+            freq[i] = freq[i - 1] + freq[i - 2];
+        }
+        huff_assign_lengths(15, 286, &freq, &mut code_lens);
+        for (i, &l) in code_lens.iter().enumerate() {
+            if freq[i] > 0 {
+                assert!(l <= 15, "length {} for symbol {} exceeds 15", l, i);
+                assert!(l > 0, "symbol {} with frequency {} has length 0", i, freq[i]);
+            } else {
+                assert_eq!(l, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_cross_version_roundtrip() {
+        let mut data = vec![0u8; 1000];
+        for i in 0..data.len() {
+            data[i] = (i % 256) as u8;
+        }
+
+        // Roundtrip version 1
+        if let Some((comp1, method1)) = smart_compress_with_version(&data, 1) {
+            let decomp1 = smart_decompress_with_version(&comp1, method1, data.len(), 1).unwrap();
+            assert_eq!(decomp1, data);
+        }
+
+        // Roundtrip version 2
+        if let Some((comp2, method2)) = smart_compress_with_version(&data, 2) {
+            let decomp2 = smart_decompress_with_version(&comp2, method2, data.len(), 2).unwrap();
+            assert_eq!(decomp2, data);
+        }
+    }
 }
+
