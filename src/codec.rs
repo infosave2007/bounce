@@ -1037,15 +1037,32 @@ fn deflate_style_encode(data: &[u8]) -> Option<Vec<u8>> {
     deflate_style_encode_with_version(data, 65536, 2)
 }
 
+pub(crate) struct CompressBuffers {
+    pub symbols: Vec<u16>,
+    pub dist_codes: Vec<u8>,
+    pub extra_bits: Vec<u8>,
+}
+
+impl CompressBuffers {
+    pub fn new() -> Self {
+        Self {
+            symbols: Vec::new(),
+            dist_codes: Vec::new(),
+            extra_bits: Vec::new(),
+        }
+    }
+}
+
 pub fn deflate_style_encode_with_version(data: &[u8], window_size: usize, version: u8) -> Option<Vec<u8>> {
+    let mut buffers = CompressBuffers::new();
     if window_size <= 65536 && data.len() <= 65536 {
         let mut head = vec![u16::MAX; LZV2_HASH_SIZE];
         let mut prev = vec![u16::MAX; window_size];
-        deflate_style_encode_with_buffers(data, &mut head, &mut prev, window_size, version)
+        deflate_style_encode_with_buffers(data, &mut head, &mut prev, &mut buffers, window_size, version)
     } else {
         let mut head = vec![u32::MAX; LZV2_HASH_SIZE];
         let mut prev = vec![u32::MAX; window_size];
-        deflate_style_encode_with_buffers(data, &mut head, &mut prev, window_size, version)
+        deflate_style_encode_with_buffers(data, &mut head, &mut prev, &mut buffers, window_size, version)
     }
 }
 
@@ -1053,6 +1070,7 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
     data: &[u8],
     head: &mut [T],
     prev: &mut [T],
+    buffers: &mut CompressBuffers,
     window_size: usize,
     version: u8,
 ) -> Option<Vec<u8>> {
@@ -1061,10 +1079,21 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
         return None;
     }
 
-    let mut symbols = Vec::with_capacity(n);
-    let mut dist_codes = Vec::with_capacity(n / 4);
+    buffers.symbols.clear();
+    buffers.dist_codes.clear();
+    buffers.extra_bits.clear();
 
-    let mut extra_bits = Vec::new();
+    if buffers.symbols.capacity() < n {
+        buffers.symbols.reserve(n);
+    }
+    if buffers.dist_codes.capacity() < n / 4 {
+        buffers.dist_codes.reserve(n / 4);
+    }
+
+    let symbols = &mut buffers.symbols;
+    let dist_codes = &mut buffers.dist_codes;
+    let extra_bits = &mut buffers.extra_bits;
+
     let mut extra_buf = 0u64;
     let mut extra_buf_len = 0;
 
@@ -1487,12 +1516,13 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
     if threads <= 1 {
         let mut head = vec![T::SENTINEL; LZV2_HASH_SIZE];
         let mut prev = vec![T::SENTINEL; window_size];
+        let mut buffers = CompressBuffers::new();
         for b in 0..num_blocks {
             let start = b * block_size;
             let end = std::cmp::min(start + block_size, n);
             let block = &data[start..end];
             head.fill(T::SENTINEL);
-            let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, window_size, version);
+            let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version);
             let res = encode_block_result(block, c_opt);
             encoded_blocks[b].write(res);
         }
@@ -1506,13 +1536,14 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
                 s.spawn(move || {
                     let mut head = vec![T::SENTINEL; LZV2_HASH_SIZE];
                     let mut prev = vec![T::SENTINEL; window_size];
+                    let mut buffers = CompressBuffers::new();
                     for (j, slot) in chunk.iter_mut().enumerate() {
                         let b = start + j;
                         let block_start = b * block_size;
                         let block_end = std::cmp::min(block_start + block_size, n);
                         let block = &data[block_start..block_end];
                         head.fill(T::SENTINEL);
-                        let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, window_size, version);
+                        let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version);
                         let res = encode_block_result(block, c_opt);
                         slot.write(res);
                     }

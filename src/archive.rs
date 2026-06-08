@@ -258,6 +258,7 @@ fn compress_stream_blocked<R: Read, W: Write, T: codec::TableIndex>(
     let mut buffer = vec![0u8; block_size];
     let mut head = vec![T::SENTINEL; codec::LZV2_HASH_SIZE];
     let mut prev = vec![T::SENTINEL; window_size];
+    let mut buffers = codec::CompressBuffers::new();
 
     loop {
         let mut block_len = 0;
@@ -278,7 +279,7 @@ fn compress_stream_blocked<R: Read, W: Write, T: codec::TableIndex>(
         *orig_size += block_len as u64;
 
         head.fill(T::SENTINEL);
-        let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, window_size, format_version);
+        let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version);
         let res = codec::encode_block_result(block, c_opt);
         w.write_all(&res)?;
         *num_blocks += 1;
@@ -309,6 +310,7 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
     let mut chunk = vec![0u8; block_size * stride];
     let mut head = vec![T::SENTINEL; codec::LZV2_HASH_SIZE];
     let mut prev = vec![T::SENTINEL; window_size];
+    let mut buffers = codec::CompressBuffers::new();
 
     let mut bytes_processed = 0;
     loop {
@@ -354,7 +356,7 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
                 for s in 0..stride {
                     if lane_buffers[s].len() >= block_size {
                         head.fill(T::SENTINEL);
-                        let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut head, &mut prev, window_size, format_version);
+                        let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut head, &mut prev, &mut buffers, window_size, format_version);
                         let res = codec::encode_block_result(&lane_buffers[s], c_opt);
                         compressed_blocks[s].push(res);
                         lane_buffers[s].clear();
@@ -369,7 +371,7 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
     for s in 0..stride {
         if !lane_buffers[s].is_empty() {
             head.fill(T::SENTINEL);
-            let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut head, &mut prev, window_size, format_version);
+            let c_opt = codec::deflate_style_encode_with_buffers(&lane_buffers[s], &mut head, &mut prev, &mut buffers, window_size, format_version);
             let res = codec::encode_block_result(&lane_buffers[s], c_opt);
             compressed_blocks[s].push(res);
             lane_buffers[s].clear();
