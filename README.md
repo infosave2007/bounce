@@ -1,5 +1,9 @@
 # bounce
 
+<p align="center">
+  <img src="assets/logo.png" alt="bounce cosmic logo" width="400">
+</p>
+
 [![Crates.io](https://img.shields.io/crates/v/nvg-bounce.svg)](https://crates.io/crates/nvg-bounce)
 [![CI](https://github.com/infosave2007/bounce/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/infosave2007/bounce/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
