@@ -25,6 +25,14 @@
 - **High-Performance Computing (HPC) & Big Data**: Rapid archiving of binary datasets, memory dumps, and telemetry data where maximizing sequential disk I/O throughput is paramount.
 - **Game Development & Asset Bundling**: Fast packing and unpacking of large binary asset archives (textures, geometry, audio banks) thanks to asynchronous buffer pools and zero external dependencies.
 
+## FAQ & Known Limitations
+
+**When should I NOT use `bounce`?**
+While `bounce` is highly optimized for specific payloads, it is not a silver bullet. You should stick to traditional archivers (like `tar.gz`, `zstd`, or `7z`) if:
+- **Your data is already compressed:** Files like `.mp4`, `.jpg`, `.gz`, or `.zip` have maximum entropy. `bounce` will detect this and fall back to raw storage to save CPU cycles, but you won't gain any compression.
+- **You are compressing huge text corpora:** For massive source code repositories or pure text logs, tools with massive dictionaries (`zstd --long`, `xz`) will achieve better ratios. `bounce` limits its LZ77 sliding window to 64 KB to keep memory overhead near zero and decompression speeds astronomical.
+- **You need extreme compression ratios regardless of speed:** `bounce` prioritizes I/O throughput (speed) over squeezing out the absolute last byte.
+
 ---
 
 ## Installation
