@@ -77,6 +77,21 @@ bounce <command> [options] <archive> [files...]
 | `-v, --verbose` | Show progress details for each file |
 | `-q, --quiet` | Suppress summary line output |
 
+### Compression Levels Example
+
+*Effect of compression levels on a 50.7 MB highly compressed video file (`.mp4`):*
+
+| Level | Window / Block Size | Compressed Size | Ratio |
+|-------|---------------------|-----------------|-------|
+| `-1` | 64 KB / 128 KB | 49.8 MB | 98.2% |
+| `-2` | 128 KB / 128 KB | 49.8 MB | 98.2% |
+| `-3` | 256 KB / 256 KB | 49.8 MB | 98.2% |
+| `-5` | 1 MB / 1 MB | 49.0 MB | 96.5% |
+| `-6` | 2 MB / 2 MB | 47.9 MB | 94.4% |
+| `-7` | 4 MB / 4 MB | 47.7 MB | 94.0% |
+| `-8` | 8 MB / 8 MB | 46.8 MB | 92.3% |
+| `-9` | 16 MB / 16 MB | 46.8 MB | 92.1% |
+
 ### Examples
 
 **Compress files and directories:**
