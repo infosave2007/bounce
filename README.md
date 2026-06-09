@@ -207,3 +207,12 @@ The NVG-bounce serves as a powerful mathematical abstraction: internally, it rep
 Distributed under the **Apache License 2.0** — see [LICENSE](LICENSE).
 
 The dynamic task routing classification mechanism (Signal Reconstruction Resonance) is covered by US Patent Application **USA 19/452,440 (Jan 19, 2026)**. See [NOTICE](NOTICE) for details.
+
+---
+
+## ❤️ Support the Project
+If you find this project helpful, you can support its development with a donation via Tribute:
+
+👉 https://t.me/tribute/app?startapp=dzX1
+
+Every donation helps keep bounce evolving. Thank you! 🙌
