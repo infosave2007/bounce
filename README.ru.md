@@ -28,14 +28,24 @@
 
 ## Установка
 
-### Сборка из исходников
+### 1. Готовые бинарные файлы (Рекомендуется)
+Вы можете скачать готовые скомпилированные версии для macOS, Linux и Windows на странице [GitHub Releases](../../releases). Установка Rust для этого не требуется.
 
+### 2. Через Cargo (crates.io)
+Если у вас установлен набор инструментов Rust, вы можете установить `bounce` напрямую из crates.io:
 ```bash
-git clone https://github.com/your-repo/bounce.git
+cargo install nvg-bounce
+```
+*(Примечание: После установки бинарный файл будет доступен в терминале как `bounce`)*
+
+### 3. Сборка из исходников
+Для сборки последней версии из исходного кода:
+```bash
+git clone https://github.com/infosave2007/bounce.git
 cd bounce
 cargo build --release
+# Исполняемый файл появится по пути target/release/bounce
 ```
-Бинарный файл появится по пути `target/release/bounce`.
 
 ### macOS Apple Silicon (M1/M2/M3/M4)
 Для максимальной производительности на Mac с процессорами ARM64 убедитесь, что вы компилируете нативно, а не через эмулятор Rosetta 2:

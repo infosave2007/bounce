@@ -28,14 +28,24 @@
 
 ## Installation
 
-### From Source
+### 1. Pre-compiled Binaries (Recommended)
+You can download pre-compiled binaries for macOS, Linux, and Windows from the [GitHub Releases](../../releases) page. No Rust installation is required.
 
+### 2. Via Cargo (crates.io)
+If you have the Rust toolchain installed, you can install `bounce` directly from crates.io:
 ```bash
-git clone https://github.com/your-repo/bounce.git
+cargo install nvg-bounce
+```
+*(Note: The installed binary will be available as `bounce` in your terminal)*
+
+### 3. Build from Source
+To build the latest development version:
+```bash
+git clone https://github.com/infosave2007/bounce.git
 cd bounce
 cargo build --release
+# The binary will be at target/release/bounce
 ```
-The binary will be available at `target/release/bounce`.
 
 ### macOS Apple Silicon (M1/M2/M3/M4)
 For maximum performance on ARM64 Macs, ensure you compile natively rather than running under Rosetta 2 emulation:
