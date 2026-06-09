@@ -161,6 +161,26 @@ Unquantized IEEE-754 weights. Demonstrates the efficiency of the byte-shuffle tr
 
 ---
 
+## Theory & Origin
+
+The name **bounce** and the codec's architectural framework are inspired by the [Vacuum-Matter Fluctuation (VMF) theory](https://github.com/infosave2007/vmf) (Null-Vector Gravity).
+
+In cosmology, the "Big Bounce" describes a cyclical universe. Unlike standard models where a collapsing universe ends in a singularity, the VMF framework proves that macroscopic melting halts collapse at a critical density ($\rho_c$), causing a bounce. This is governed by the modified Friedmann equation:
+
+$$ H^2 \propto \rho \left(1 - \frac{\rho}{\rho_c}\right) $$
+
+where the critical density is mathematically tied to the **Golden Ratio**: $\rho_c \propto \frac{3 - \sqrt{5}}{2}$.
+
+**Cosmological "Bounce" as Codec Architecture:**
+The `bounce` algorithm implements this physical model as a reproducible computational pipeline:
+- **Collapse:** The discrete evolution of the bitstring "collapses" data into ultra-dense blocks.
+- **Critical Density:** The archiver avoids informational "singularity" by halting compression at a critical entropy threshold, leveraging golden ratio proportions for optimal packing limits.
+- **Bounce:** The compressed data expands back exactly to its original state during rapid lossless decompression.
+
+The NVG-bounce serves as a powerful mathematical abstraction: internally, it represents a deep cosmological model of information evolution; externally, it operates as an extremely fast utility that seamlessly compresses and restores your data.
+
+---
+
 ## License & Patent
 
 Distributed under the **Apache License 2.0** — see [LICENSE](LICENSE).
