@@ -1,5 +1,6 @@
 # bounce
 
+[![Crates.io](https://img.shields.io/crates/v/nvg-bounce.svg)](https://crates.io/crates/nvg-bounce)
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 ![Rust](https://img.shields.io/badge/rust-1.70%2B-orange)
