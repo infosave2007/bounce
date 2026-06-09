@@ -70,7 +70,7 @@ bounce <command> [options] <archive> [files...]
 
 | Option | Description |
 |--------|-------------|
-| `-1 ... -8` | Compression level (default: `-1`). `-1` is fastest, `-8` provides maximum compression via larger search windows |
+| `-1 ... -9` | Compression level (default: `-1`). `-1` is fastest, `-9` provides maximum compression via larger search windows |
 | `-o, --output <dir>` | Directory for extraction (default: current directory) |
 | `-c, --stdout` | Output decompressed file(s) directly to stdout |
 | `-f, --force` | Overwrite existing files during extraction |

@@ -31,7 +31,7 @@ COMMANDS:
     v, version                               Show version
 
 OPTIONS:
-    -1 ... -8            Compression levels (default: -1):
+    -1 ... -9            Compression levels (default: -1):
                             -1: 64 KB window, 128 KB blocks (fastest)
                            -2: 128 KB window, 128 KB blocks
                            -3: 256 KB window, 256 KB blocks
@@ -39,7 +39,8 @@ OPTIONS:
                            -5: 1 MB window, 1 MB blocks
                            -6: 2 MB window, 2 MB blocks
                            -7: 4 MB window, 4 MB blocks
-                           -8: 8 MB window, 8 MB blocks (strongest)
+                           -8: 8 MB window, 8 MB blocks
+                           -9: 16 MB window, 16 MB blocks (strongest)
     -o, --output <dir>   Extract into <dir> (default: current directory)
     -c, --stdout         Write extracted file(s) to stdout instead of disk
     -f, --force          Overwrite existing files when extracting
@@ -101,6 +102,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "-6" => opts.level = 6,
             "-7" => opts.level = 7,
             "-8" => opts.level = 8,
+            "-9" => opts.level = 9,
             _ if a.starts_with('-') && a.len() > 1 => {
                 return Err(format!("unknown option: {a}"));
             }
