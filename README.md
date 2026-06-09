@@ -163,14 +163,14 @@ Run benchmarks locally using: `bash benchmark.sh`
 ### Safetensors Model Weights — 450.05 MB (`model-mtp.safetensors`)
 Unquantized IEEE-754 weights. Demonstrates the efficiency of the byte-shuffle transform.
 
-| Tool | Size | Ratio | C (Compression) | D (Decompression) |
-|------|-----:|------:|----------------:|------------------:|
-| **bounce** | **339.3 MB** | **71.9%** | **110.7 MB/s** | **~1.3 GB/s** |
-| gzip -9 | 374.3 MB | 79.3% | 18.1 MB/s | 352.9 MB/s |
-| lz4 -9 | 468.5 MB | 99.3% | 189.5 MB/s | 2044.8 MB/s |
-| zstd -3 | 351.5 MB | 78.1% | 598.4 MB/s | 808.0 MB/s |
-| zstd -19 | 359.4 MB | 76.2% | 12.4 MB/s | 383.5 MB/s |
-| brotli -q 5 | 368.6 MB | 78.1% | 97.7 MB/s | 217.8 MB/s |
+| Tool | Size | Ratio | C (Speed) | D (Speed) | RAM (Peak) |
+|------|-----:|------:|----------:|----------:|-----------:|
+| **bounce** | **339.3 MB** | **71.9%** | **110.7 MB/s** | **~1.3 GB/s** | **73.6 MB** |
+| gzip -9 | 374.3 MB | 79.3% | 18.1 MB/s | 352.9 MB/s | 1.4 MB |
+| lz4 -9 | 468.5 MB | 99.3% | 189.5 MB/s | 2044.8 MB/s | 35.3 MB |
+| zstd -3 | 351.5 MB | 78.1% | 598.4 MB/s | 808.0 MB/s | 7.8 MB |
+| zstd -19 | 359.4 MB | 76.2% | 12.4 MB/s | 383.5 MB/s | 13.7 MB |
+| brotli -q 5 | 368.6 MB | 78.1% | 97.7 MB/s | 217.8 MB/s | 29.4 MB |
 
 ### Text — 1.32 MB (Repeating Markdown Corpus)
 
