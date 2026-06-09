@@ -3,6 +3,10 @@
 // A simple, sequential multi-file container. Each member file is compressed
 // independently with the Big Bounce smart codec, which keeps `list`, `test`
 // and selective `extract` cheap (no need to inflate unrelated members).
+
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::too_many_arguments)]
 //
 // On-disk layout (all integers little-endian):
 //
@@ -627,8 +631,7 @@ pub fn create(
     let archive_dir = Path::new(archive_path).parent().unwrap_or_else(|| Path::new("."));
     if let Some(free_space) = get_free_space(archive_dir) {
         if free_space < required_space {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!("Not enough free disk space for archive. Required: {:.1} MB, Free: {:.1} MB", required_space as f64 / 1_048_576.0, free_space as f64 / 1_048_576.0),
             ));
         }
@@ -773,7 +776,7 @@ pub fn create(
 
                 // Read 1MB sample from the middle of the file to bypass metadata headers and determine the best method
                 let sample_offset = file_size / 2;
-                let sample_size = std::cmp::min(file_size - sample_offset, 1 * 1024 * 1024) as usize;
+                let sample_size = std::cmp::min(file_size - sample_offset, 1024 * 1024) as usize;
                 let mut sample = vec![0u8; sample_size];
                 file.seek(SeekFrom::Start(sample_offset))?;
                 file.read_exact(&mut sample)?;
@@ -827,40 +830,38 @@ pub fn create(
                             &f.rel,
                         )?;
                     }
+                } else if method == codec::CompressMethod::Blocked {
+                    let mut reader = BufReader::with_capacity(2 * 1024 * 1024, file);
+                    compress_stream_blocked::<_, _, u32>(
+                        &mut reader,
+                        &mut w,
+                        window_size,
+                        block_size,
+                        format_version,
+                        &mut crc,
+                        &mut orig_size,
+                        &mut num_blocks,
+                        show_progress,
+                        &f.rel,
+                        file_size,
+                    )?;
                 } else {
-                    if method == codec::CompressMethod::Blocked {
-                        let mut reader = BufReader::with_capacity(2 * 1024 * 1024, file);
-                        compress_stream_blocked::<_, _, u32>(
-                            &mut reader,
-                            &mut w,
-                            window_size,
-                            block_size,
-                            format_version,
-                            &mut crc,
-                            &mut orig_size,
-                            &mut num_blocks,
-                            show_progress,
-                            &f.rel,
-                            file_size,
-                        )?;
-                    } else {
-                        let stride = if method == codec::CompressMethod::ShuffleBlk { 4 } else { 2 };
-                        let mut reader = BufReader::with_capacity(2 * 1024 * 1024, file);
-                        compress_stream_shuffled_blocked::<_, _, u32>(
-                            &mut reader,
-                            &mut w,
-                            file_size,
-                            stride,
-                            window_size,
-                            block_size,
-                            format_version,
-                            &mut crc,
-                            &mut orig_size,
-                            &mut num_blocks,
-                            show_progress,
-                            &f.rel,
-                        )?;
-                    }
+                    let stride = if method == codec::CompressMethod::ShuffleBlk { 4 } else { 2 };
+                    let mut reader = BufReader::with_capacity(2 * 1024 * 1024, file);
+                    compress_stream_shuffled_blocked::<_, _, u32>(
+                        &mut reader,
+                        &mut w,
+                        file_size,
+                        stride,
+                        window_size,
+                        block_size,
+                        format_version,
+                        &mut crc,
+                        &mut orig_size,
+                        &mut num_blocks,
+                        show_progress,
+                        &f.rel,
+                    )?;
                 }
 
                 let payload_end = w.stream_position()?;
@@ -1197,7 +1198,7 @@ fn extract_entry_payload<R: Read + Seek + Send, W: Write>(
                     let mut buf = rx_pool.recv().unwrap();
                     unsafe { buf.set_len(1024 * 1024); } // safe because it was fully initialized before
                     match dec.read(&mut buf) {
-                        Ok(n) if n == 0 => {
+                        Ok(0) => {
                             let _ = tx.send(Ok(None));
                             break;
                         }
@@ -1222,9 +1223,7 @@ fn extract_entry_payload<R: Read + Seek + Send, W: Write>(
                 match msg {
                     Ok(Some(buf)) => {
                         c = crc32_update(c, &buf);
-                        if let Err(e) = w.write_all(&buf) {
-                            return Err(e);
-                        }
+                        w.write_all(&buf)?;
                         decomp_bytes += buf.len() as u64;
                         print_progress("extracting", &meta.path, decomp_bytes, meta.orig_size, 0, start_time);
                         let _ = tx_pool.send(buf);
@@ -1355,8 +1354,7 @@ pub fn extract(
         
         if let Some(free_space) = get_free_space(dest) {
             if free_space < total_orig_size {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
+                return Err(io::Error::other(
                     format!("Not enough free disk space for extraction. Required: {:.1} MB, Free: {:.1} MB", total_orig_size as f64 / 1_048_576.0, free_space as f64 / 1_048_576.0),
                 ));
             }

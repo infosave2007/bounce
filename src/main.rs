@@ -183,8 +183,8 @@ fn cmd_list(opts: &Options) -> Result<(), String> {
     let entries = archive::list_entries(archive).map_err(|e| format!("list: {e}"))?;
 
     println!(
-        "{:>12}  {:>12}  {:>6}  {:>10}  {}",
-        "Original", "Stored", "Ratio", "Method", "Name"
+        "{:>12}  {:>12}  {:>6}  {:>10}  Name",
+        "Original", "Stored", "Ratio", "Method"
     );
     println!("{}", "-".repeat(64));
     let mut orig_total = 0u64;

@@ -3,8 +3,10 @@
 // benchmark implementation and exposed as a reusable library module.
 #![allow(dead_code)]
 #![allow(unused_assignments)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::type_complexity)]
 
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek};
 
 
 // Distance code table (deflate-style, inspired by FCD factorization)
@@ -27,7 +29,7 @@ const DIST_CODE_TABLE: [(u16, u8); 32] = [
     (32768, 14), (49152, 14),                // codes 30-31: 14 extra bits (64KB window)
 ];
 
-const DIST_LOOKUP: [u8; 65536] = {
+static DIST_LOOKUP: [u8; 65536] = {
     let mut lookup = [0u8; 65536];
     let mut j = 0;
     while j < 32 {
@@ -1174,7 +1176,7 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
                         limit = LZV2_MAX_MATCH;
                     }
                     let target_len = best_len + 1;
-                    if p >= i + 1 {
+                    if p > i {
                         break;
                     }
                     if target_len < limit && data[p] == data[i + 1] && data[p + target_len] == data[i + 1 + target_len] {
@@ -1212,7 +1214,7 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
                             limit = LZV2_MAX_MATCH;
                         }
                         let target_len = best_len + 1;
-                        if p >= i + 1 {
+                        if p > i {
                             break;
                         }
                         if target_len < limit && data[p] == data[i + 1] && data[p + target_len] == data[i + 1 + target_len] {
@@ -1263,10 +1265,10 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
 
     *extra_bits = bw.finish();
 
-    let sym_comp = huff_encode_uint16(&symbols, version)?;
+    let sym_comp = huff_encode_uint16(symbols, version)?;
     let mut dist_comp = Vec::new();
     if !dist_codes.is_empty() {
-        if let Some(comp) = huff_encode(&dist_codes) {
+        if let Some(comp) = huff_encode(dist_codes) {
             dist_comp = comp;
         } else {
             dist_comp = dist_codes.clone();
@@ -1287,7 +1289,7 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
 
     out.extend_from_slice(&sym_comp);
     out.extend_from_slice(&dist_comp);
-    out.extend_from_slice(&extra_bits);
+    out.extend_from_slice(extra_bits);
 
     Some(out)
 }
@@ -1442,12 +1444,12 @@ where
 {
     let threads = num_threads(n);
     if threads <= 1 {
-        return (0..n).map(|i| f(i)).collect();
+        return (0..n).map(&f).collect();
     }
 
     use std::mem::MaybeUninit;
     let mut results: Vec<MaybeUninit<T>> = (0..n).map(|_| MaybeUninit::uninit()).collect();
-    let chunk_size = (n + threads - 1) / threads;
+    let chunk_size = n.div_ceil(threads);
     let f = &f;
     std::thread::scope(|s| {
         let mut base = 0usize;
@@ -1524,7 +1526,7 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
     version: u8,
 ) -> Option<Vec<u8>> {
     let n = data.len();
-    let num_blocks = (n + block_size - 1) / block_size;
+    let num_blocks = n.div_ceil(block_size);
     let threads = num_threads(num_blocks);
 
     use std::mem::MaybeUninit;
@@ -1546,7 +1548,7 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
             encoded_blocks[b].write(res);
         }
     } else {
-        let chunk_size = (num_blocks + threads - 1) / threads;
+        let chunk_size = num_blocks.div_ceil(threads);
         std::thread::scope(|s| {
             let mut base = 0usize;
             for chunk in encoded_blocks.chunks_mut(chunk_size) {
@@ -1654,7 +1656,7 @@ fn deflate_blocked_decode_with_version(data: &[u8], expected_len: usize, version
         }
     } else {
         let has_error = std::sync::atomic::AtomicBool::new(false);
-        let chunk_size = (work.len() + threads - 1) / threads;
+        let chunk_size = work.len().div_ceil(threads);
         let has_error_ref = &has_error;
         let results = std::thread::scope(|s| {
             let mut handles = Vec::new();
@@ -2344,8 +2346,7 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                             let flag = header_buf[8];
                             let lane_id = std::cmp::min(header_buf[9] as usize, *stride - 1);
                             
-                            let mut comp_buf = Vec::with_capacity(comp_size);
-                            unsafe { comp_buf.set_len(comp_size); }
+                            let mut comp_buf = vec![0u8; comp_size];
                             self.inner.read_exact(&mut comp_buf)?;
                             batch_comp.push((lane_id, comp_buf, orig_size, flag));
                         }
@@ -2355,7 +2356,7 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                             let version = self.version;
                             let decomp_batch = std::thread::scope(|scope| {
                                 let num_threads = std::cmp::min(concurrency, batch_comp.len());
-                                let chunk_size = (batch_comp.len() + num_threads - 1) / num_threads;
+                                let chunk_size = batch_comp.len().div_ceil(num_threads);
                                 let mut handles = Vec::with_capacity(num_threads);
                                 
                                 for chunk in batch_comp.chunks(chunk_size) {
@@ -2407,8 +2408,7 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                         
                         let new_len = groups_to_process * *stride;
                         buffer.clear();
-                        buffer.reserve(new_len);
-                        unsafe { buffer.set_len(new_len); }
+                        buffer.resize(new_len, 0);
                         
                         let mut block_slices = Vec::with_capacity(*stride);
                         for s in 0..*stride {
@@ -2462,8 +2462,7 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                         let to_process = std::cmp::min(remaining_bytes, remaining_in_block);
                         
                         buffer.clear();
-                        buffer.reserve(to_process);
-                        unsafe { buffer.set_len(to_process); }
+                        buffer.resize(to_process, 0);
                         
                         let block_slice = active_blocks[*stride - 1].front().unwrap().as_slice();
                         for i in 0..to_process {
