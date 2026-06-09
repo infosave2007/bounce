@@ -1,7 +1,7 @@
 # bounce
 
 [![Crates.io](https://img.shields.io/crates/v/nvg-bounce.svg)](https://crates.io/crates/nvg-bounce)
-[![CI](https://github.com/infosave2007/bounce/actions/workflows/ci.yml/badge.svg)](https://github.com/infosave2007/bounce/actions/workflows/ci.yml)
+[![CI](https://github.com/infosave2007/bounce/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/infosave2007/bounce/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 ![Rust](https://img.shields.io/badge/rust-1.70%2B-orange)
 
