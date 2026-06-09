@@ -5,3 +5,5 @@ Cargo.lock
 /.bin
 query_openrouter.py
 model_optimizations.md
+.DS_Store
+**/.DS_Store
