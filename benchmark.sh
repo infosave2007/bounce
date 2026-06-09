@@ -99,6 +99,9 @@ bench_file() {
     run_tool "zstd -19" "$orig" "$TMP/o.zst" \
         "zstd -19 -T0 -c '$path' > '$TMP/o.zst'" \
         "zstd -dc -T0 '$TMP/o.zst'"
+    run_tool "zstd -3" "$orig" "$TMP/o.zst3" \
+        "zstd -3 -T0 -c '$path' > '$TMP/o.zst3'" \
+        "zstd -dc -T0 '$TMP/o.zst3'"
     run_tool "bzip2 -9" "$orig" "$TMP/o.bz2" \
         "bzip2 -9 -c '$path' > '$TMP/o.bz2'" \
         "bzip2 -dc '$TMP/o.bz2'"
