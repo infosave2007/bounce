@@ -7,3 +7,6 @@ query_openrouter.py
 model_optimizations.md
 .DS_Store
 **/.DS_Store
+/.bench_public/
+/test_*.sh
+/test_*.rs
