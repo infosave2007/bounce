@@ -93,7 +93,7 @@ bounce <command> [options] <archive> [files...]
 
 | Option | Description |
 |--------|-------------|
-| `-1 ... -9` | Compression level (default: `-1`). `-1` is fastest, `-9` provides maximum compression via larger search windows |
+| `-1 ... -N` | Compression level (default: `-1`). `-1` is fastest, `-N` scales exponentially (e.g. `-10` = 32 MB window). |
 | `-o, --output <dir>` | Directory for extraction (default: current directory) |
 | `-c, --stdout` | Output decompressed file(s) directly to stdout |
 | `-f, --force` | Overwrite existing files during extraction |
@@ -114,6 +114,7 @@ bounce <command> [options] <archive> [files...]
 | `-7` | 4 MB / 4 MB | 47.7 MB | 94.0% |
 | `-8` | 8 MB / 8 MB | 46.8 MB | 92.3% |
 | `-9` | 16 MB / 16 MB | 46.8 MB | 92.1% |
+| `-10`| 32 MB / 32 MB | 46.8 MB | 92.1% |
 
 ### Examples
 

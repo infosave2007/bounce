@@ -40,7 +40,8 @@ OPTIONS:
                            -6: 2 MB window, 2 MB blocks
                            -7: 4 MB window, 4 MB blocks
                            -8: 8 MB window, 8 MB blocks
-                           -9: 16 MB window, 16 MB blocks (strongest)
+                           -9: 16 MB window, 16 MB blocks
+                           -10+: scales exponentially up to available RAM
     -o, --output <dir>   Extract into <dir> (default: current directory)
     -c, --stdout         Write extracted file(s) to stdout instead of disk
     -f, --force          Overwrite existing files when extracting
@@ -94,15 +95,16 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "-c" | "--stdout" => opts.to_stdout = true,
             "-v" | "--verbose" => opts.verbose = true,
             "-q" | "--quiet" => opts.quiet = true,
-            "-1" => opts.level = 1,
-            "-2" => opts.level = 2,
-            "-3" => opts.level = 3,
-            "-4" => opts.level = 4,
-            "-5" => opts.level = 5,
-            "-6" => opts.level = 6,
-            "-7" => opts.level = 7,
-            "-8" => opts.level = 8,
-            "-9" => opts.level = 9,
+            arg if arg.starts_with('-') && arg.len() > 1 && arg[1..].chars().all(|c| c.is_ascii_digit()) => {
+                if let Ok(lvl) = arg[1..].parse::<u8>() {
+                    if lvl == 0 {
+                        return Err("level must be >= 1".to_string());
+                    }
+                    opts.level = lvl;
+                } else {
+                    return Err(format!("invalid compression level: {arg}"));
+                }
+            }
             _ if a.starts_with('-') && a.len() > 1 => {
                 return Err(format!("unknown option: {a}"));
             }

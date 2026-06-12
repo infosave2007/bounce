@@ -641,12 +641,12 @@ pub fn create(
     let window_size = if level == 1 {
         65536
     } else {
-        32768usize << level
+        32768usize.checked_shl(level as u32).unwrap_or(usize::MAX / 2)
     };
     let block_size = if level == 1 {
         131072
     } else {
-        window_size
+        65536usize.checked_shl(level as u32).unwrap_or(usize::MAX / 2)
     };
 
     let out_file = fs::File::create(archive_path)?;
