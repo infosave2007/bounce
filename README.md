@@ -169,7 +169,7 @@ Run benchmarks locally using: `bash benchmark.sh`
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **34.7 MB** | **36.4%** | **46.7 MB/s** | **696.7 MB/s** |
+| **bounce -2** | **34.7 MB** | **36.4%** | **67.1 MB/s** | **762.4 MB/s** |
 | zstd -3 | 33.8 MB | 35.4% | 753.3 MB/s | 823.6 MB/s |
 | gzip -9 | 34.8 MB | 36.5% | 32.1 MB/s | 653.5 MB/s |
 | lz4 -9 | 40.3 MB | 42.3% | 240.9 MB/s | 1210.9 MB/s |
@@ -182,7 +182,7 @@ Run benchmarks locally using: `bash benchmark.sh`
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **218.0 MB** | **85.3%** | **167.6 MB/s** | **968.1 MB/s** |
+| **bounce -2** | **218.1 MB** | **85.3%** | **175.0 MB/s** | **972.2 MB/s** |
 | zstd -3 | 235.3 MB | 92.1% | 2056.8 MB/s | 1035.1 MB/s |
 | gzip -9 | 235.6 MB | 92.2% | 39.2 MB/s | 481.2 MB/s |
 | lz4 -9 | 255.5 MB | 100.0% | 381.3 MB/s | 2889.1 MB/s |
@@ -195,7 +195,7 @@ Run benchmarks locally using: `bash benchmark.sh`
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **65.6 MB** | **32.4%** | **225.6 MB/s** | **867.0 MB/s** |
+| **bounce -2** | **65.6 MB** | **32.4%** | **234.5 MB/s** | **912.3 MB/s** |
 | zstd -3 | 63.2 MB | 31.3% | 1337.3 MB/s | 1150.3 MB/s |
 | gzip -9 | 64.5 MB | 31.9% | 19.5 MB/s | 896.2 MB/s |
 | lz4 -9 | 74.4 MB | 36.8% | 252.7 MB/s | 1848.5 MB/s |
@@ -208,7 +208,7 @@ Run benchmarks locally using: `bash benchmark.sh`
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **34.8 MB** | **21.2%** | **149.7 MB/s** | **998.2 MB/s** |
+| **bounce -2** | **35.0 MB** | **21.3%** | **161.6 MB/s** | **985.4 MB/s** |
 | zstd -3 | 37.9 MB | 23.1% | 1286.2 MB/s | 935.9 MB/s |
 | gzip -9 | 33.2 MB | 20.2% | 7.6 MB/s | 1121.7 MB/s |
 | lz4 -9 | 46.9 MB | 28.5% | 108.0 MB/s | 1679.0 MB/s |
@@ -221,7 +221,7 @@ Run benchmarks locally using: `bash benchmark.sh`
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **20.9 MB** | **11.6%** | **379.8 MB/s** | **1178.2 MB/s** |
+| **bounce -2** | **20.4 MB** | **11.3%** | **404.2 MB/s** | **1212.2 MB/s** |
 | zstd -3 | 17.7 MB | 9.8% | 1916.6 MB/s | 1795.7 MB/s |
 | gzip -9 | 21.2 MB | 11.7% | 46.4 MB/s | 1733.4 MB/s |
 | lz4 -9 | 23.6 MB | 13.1% | 576.7 MB/s | 2092.8 MB/s |
@@ -234,7 +234,7 @@ Run benchmarks locally using: `bash benchmark.sh`
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -9** | **60.8 MB** | **98.6%** | **0.3 MB/s** | **423.3 MB/s** |
+| **bounce -9** | **60.8 MB** | **98.6%** | **0.3 MB/s** | **474.5 MB/s** |
 | zstd -3 | 61.6 MB | 99.8% | 932.9 MB/s | 1504.3 MB/s |
 | gzip -9 | 61.5 MB | 99.7% | 57.2 MB/s | 721.0 MB/s |
 | lz4 -9 | 61.6 MB | 99.9% | 302.7 MB/s | 1274.0 MB/s |

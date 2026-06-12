@@ -29,30 +29,14 @@ const DIST_CODE_TABLE: [(u16, u8); 32] = [
     (32768, 14), (49152, 14),                // codes 30-31: 14 extra bits (64KB window)
 ];
 
-static DIST_LOOKUP: [u8; 65536] = {
-    let mut lookup = [0u8; 65536];
-    let mut j = 0;
-    while j < 32 {
-        let start = DIST_CODE_TABLE[j].0 as usize;
-        let end = if j + 1 < 32 {
-            DIST_CODE_TABLE[j + 1].0 as usize
-        } else {
-            65536
-        };
-        let mut i = start;
-        while i < end {
-            lookup[i] = j as u8;
-            i += 1;
-        }
-        j += 1;
-    }
-    lookup
-};
-
 fn dist_to_code(dist: u16) -> (u8, u16, u8) {
-    let code = DIST_LOOKUP[dist as usize];
-    let (base, extra_bits) = DIST_CODE_TABLE[code as usize];
-    (code, dist - base, extra_bits)
+    if dist < 4 {
+        return (dist as u8, 0, 0);
+    }
+    let msb = 15 - dist.leading_zeros() as u8;
+    let extra_bits = msb - 1;
+    let code = (msb << 1) | ((dist >> extra_bits) as u8 & 1);
+    (code, dist & ((1 << extra_bits) - 1), extra_bits)
 }
 
 fn code_to_dist(code: u8, extra: u16) -> u16 {
@@ -650,7 +634,7 @@ impl<'a> BitReader<'a> {
     }
 }
 
-fn huff_decode_uint16(data: &[u8], expected_len: usize, version: u8) -> Result<Vec<u16>, String> {
+fn build_huff16_tables_and_stream(data: &[u8], version: u8) -> Result<([u16; 2048], Vec<u16>, &[u8]), String> {
     let (max_bits, _rle_len, header_len, start_idx) = if version >= 2 {
         if data.len() < 3 {
             return Err("huffUint16: data too short for header".to_string());
@@ -735,37 +719,7 @@ fn huff_decode_uint16(data: &[u8], expected_len: usize, version: u8) -> Result<V
         }
     }
 
-    let sub_tables_slice = sub_tables.as_slice();
-    let mut out = Vec::with_capacity(expected_len);
-    let mut reader = BitReader::new(bitstream);
-
-    while out.len() < expected_len {
-        let peek15 = reader.peek(15) as usize;
-        let root_idx = peek15 >> 4;
-        let entry = unsafe { *root_table.get_unchecked(root_idx) };
-        let (sym, bits) = unpack_table_entry(entry);
-        if bits == SUB_TABLE_INDICATOR {
-            let sub_idx = (sym as usize) * 16 + (peek15 & 0x0F);
-            let sub_entry = unsafe { *sub_tables_slice.get_unchecked(sub_idx) };
-            let (sub_sym, sub_bits) = unpack_table_entry(sub_entry);
-            if sub_bits == 0 {
-                return Err("huffUint16: invalid code".to_string());
-            }
-            out.push(sub_sym);
-            reader.consume(sub_bits as usize);
-        } else {
-            if bits == 0 {
-                return Err("huffUint16: invalid code".to_string());
-            }
-            out.push(sym);
-            reader.consume(bits as usize);
-        }
-    }
-
-    if out.len() != expected_len {
-        return Err(format!("huffUint16: got {} want {}", out.len(), expected_len));
-    }
-    Ok(out)
+    Ok((root_table, sub_tables, bitstream))
 }
 
 const HUFF_ALPHABET_SIZE: usize = 256;
@@ -1072,11 +1026,11 @@ pub fn deflate_style_encode_with_version(data: &[u8], window_size: usize, versio
     if window_size <= 65536 && data.len() <= 65536 {
         let mut head = vec![u16::MAX; LZV2_HASH_SIZE];
         let mut prev = vec![u16::MAX; window_size];
-        deflate_style_encode_with_buffers(data, &mut head, &mut prev, &mut buffers, window_size, version)
+        deflate_style_encode_with_buffers(data, &mut head, &mut prev, &mut buffers, window_size, version, 0)
     } else {
         let mut head = vec![u32::MAX; LZV2_HASH_SIZE];
         let mut prev = vec![u32::MAX; window_size];
-        deflate_style_encode_with_buffers(data, &mut head, &mut prev, &mut buffers, window_size, version)
+        deflate_style_encode_with_buffers(data, &mut head, &mut prev, &mut buffers, window_size, version, 0)
     }
 }
 
@@ -1087,6 +1041,7 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
     buffers: &mut CompressBuffers,
     window_size: usize,
     version: u8,
+    base: usize,
 ) -> Option<Vec<u8>> {
     let n = data.len();
     if n < 128 {
@@ -1128,13 +1083,13 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
         if i + LZV2_MIN_MATCH <= n {
             let h = lzv2_hash(data, i) as usize;
             let mut pos = head[h];
-            prev[i & (window_size - 1)] = pos;
-            head[h] = T::from_usize(i);
-            let min_pos = i.saturating_sub(window_size);
+            prev[(base + i) & (window_size - 1)] = pos;
+            head[h] = T::from_usize(base + i);
+            let min_pos = (base + i).saturating_sub(window_size).max(base);
             let mut cl = 0;
             let mut max_chain = LZV2_MAX_CHAIN;
             while !pos.is_sentinel() && pos.to_usize() >= min_pos && cl < max_chain {
-                let p = pos.to_usize();
+                let p = pos.to_usize() - base;
                 let mut limit = n - i;
                 if limit > LZV2_MAX_MATCH {
                     limit = LZV2_MAX_MATCH;
@@ -1157,9 +1112,13 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
                         }
                     }
                 }
-                pos = prev[p & (window_size - 1)];
+                pos = prev[pos.to_usize() & (window_size - 1)];
                 cl += 1;
             }
+        }
+
+        if best_len == 3 && best_dist > 4096 {
+            best_len = 0;
         }
 
         if best_len >= LZV2_MIN_MATCH {
@@ -1167,28 +1126,25 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
             if best_len < GOOD_MATCH && i + 1 + LZV2_MIN_MATCH <= n && best_len < LZV2_MAX_MATCH {
                 let h2 = lzv2_hash(data, i + 1) as usize;
                 let mut pos2 = head[h2];
-                let min_pos2 = (i + 1).saturating_sub(window_size);
+                let min_pos2 = (base + i + 1).saturating_sub(window_size).max(base);
                 let mut cl2 = 0;
                 while !pos2.is_sentinel() && pos2.to_usize() >= min_pos2 && cl2 < LZV2_MAX_CHAIN / 2 {
-                    let p = pos2.to_usize();
+                    let p = pos2.to_usize() - base;
                     let mut limit = n - (i + 1);
                     if limit > LZV2_MAX_MATCH {
                         limit = LZV2_MAX_MATCH;
                     }
-                    let target_len = best_len + 1;
-                    if p > i {
-                        break;
-                    }
-                    if target_len < limit && data[p] == data[i + 1] && data[p + target_len] == data[i + 1 + target_len] {
+                    if best_len <= limit && data[p] == data[i + 1] && data[p + best_len - 1] == data[i + 1 + best_len - 1] {
                         let l = match_len_u64(data, p, i + 1, limit);
-                        if l > target_len {
+                        let d = i + 1 - p;
+                        if l > best_len || (l == best_len && d < best_dist / 4) {
                             best_len = l;
-                            best_dist = i + 1 - p;
+                            best_dist = d;
                             skip = true;
                             break;
                         }
                     }
-                    pos2 = prev[p & (window_size - 1)];
+                    pos2 = prev[pos2.to_usize() & (window_size - 1)];
                     cl2 += 1;
                 }
             }
@@ -1197,36 +1153,33 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
                 symbols.push(data[i] as u16);
                 i += 1;
                 let h3 = lzv2_hash(data, i) as usize;
-                prev[i & (window_size - 1)] = head[h3];
-                head[h3] = T::from_usize(i);
+                prev[(base + i) & (window_size - 1)] = head[h3];
+                head[h3] = T::from_usize(base + i);
 
                 // Lazy-2: check if we should skip i again in favor of i+1
                 let mut skip2 = false;
                 if best_len < GOOD_MATCH && i + 1 + LZV2_MIN_MATCH <= n && best_len < LZV2_MAX_MATCH {
                     let h2 = lzv2_hash(data, i + 1) as usize;
                     let mut pos2 = head[h2];
-                    let min_pos2 = (i + 1).saturating_sub(window_size);
+                    let min_pos2 = (base + i + 1).saturating_sub(window_size).max(base);
                     let mut cl2 = 0;
                     while !pos2.is_sentinel() && pos2.to_usize() >= min_pos2 && cl2 < LZV2_MAX_CHAIN / 2 {
-                        let p = pos2.to_usize();
+                        let p = pos2.to_usize() - base;
                         let mut limit = n - (i + 1);
                         if limit > LZV2_MAX_MATCH {
                             limit = LZV2_MAX_MATCH;
                         }
-                        let target_len = best_len + 1;
-                        if p > i {
-                            break;
-                        }
-                        if target_len < limit && data[p] == data[i + 1] && data[p + target_len] == data[i + 1 + target_len] {
+                        if best_len <= limit && data[p] == data[i + 1] && data[p + best_len - 1] == data[i + 1 + best_len - 1] {
                             let l = match_len_u64(data, p, i + 1, limit);
-                            if l > target_len {
+                            let d = i + 1 - p;
+                            if l > best_len || (l == best_len && d < best_dist / 4) {
                                 best_len = l;
-                                best_dist = i + 1 - p;
+                                best_dist = d;
                                 skip2 = true;
                                 break;
                             }
                         }
-                        pos2 = prev[p & (window_size - 1)];
+                        pos2 = prev[pos2.to_usize() & (window_size - 1)];
                         cl2 += 1;
                     }
                 }
@@ -1235,8 +1188,8 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
                     symbols.push(data[i] as u16);
                     i += 1;
                     let h3 = lzv2_hash(data, i) as usize;
-                    prev[i & (window_size - 1)] = head[h3];
-                    head[h3] = T::from_usize(i);
+                    prev[(base + i) & (window_size - 1)] = head[h3];
+                    head[h3] = T::from_usize(base + i);
                 }
             }
 
@@ -1252,8 +1205,8 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
             for j in 1..best_len {
                 if i + j + LZV2_MIN_MATCH <= n {
                     let h = lzv2_hash(data, i + j) as usize;
-                    prev[(i + j) & (window_size - 1)] = head[h];
-                    head[h] = T::from_usize(i + j);
+                    prev[(base + i + j) & (window_size - 1)] = head[h];
+                    head[h] = T::from_usize(base + i + j);
                 }
             }
             i += best_len;
@@ -1314,7 +1267,9 @@ pub(crate) fn deflate_style_decode_with_version(data: &[u8], expected_len: usize
     }
 
     let sym_cd = &data[20..20 + sym_comp_sz];
-    let symbols = huff_decode_uint16(sym_cd, num_syms, version)?;
+    let (root_table, sub_tables, bitstream) = build_huff16_tables_and_stream(sym_cd, version)?;
+    let sub_tables_slice = sub_tables.as_slice();
+    let mut reader = BitReader::new(bitstream);
 
     let dist_start = 20 + sym_comp_sz;
     if dist_start + dist_comp_sz > data.len() {
@@ -1363,8 +1318,25 @@ pub(crate) fn deflate_style_decode_with_version(data: &[u8], expected_len: usize
     let mut out = Vec::with_capacity(expected_len);
     let mut di = 0;
 
-    for si in 0..num_syms {
-        let sym = symbols[si];
+    for _ in 0..num_syms {
+        let peek15 = reader.peek(15) as usize;
+        let root_idx = peek15 >> 4;
+        let entry = unsafe { *root_table.get_unchecked(root_idx) };
+        let (mut sym, mut bits) = unpack_table_entry(entry);
+        if bits == SUB_TABLE_INDICATOR {
+            let sub_idx = (sym as usize) * 16 + (peek15 & 0x0F);
+            let sub_entry = unsafe { *sub_tables_slice.get_unchecked(sub_idx) };
+            let (sub_sym, sub_bits) = unpack_table_entry(sub_entry);
+            if sub_bits == 0 {
+                return Err("huffUint16: invalid code".to_string());
+            }
+            sym = sub_sym;
+            bits = sub_bits;
+        } else if bits == 0 {
+            return Err("huffUint16: invalid code".to_string());
+        }
+        reader.consume(bits as usize);
+
         if sym < 256 {
             out.push(sym as u8);
         } else {
@@ -1538,14 +1510,15 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
         let mut head = vec![T::SENTINEL; LZV2_HASH_SIZE];
         let mut prev = vec![T::SENTINEL; window_size];
         let mut buffers = CompressBuffers::new();
+        let mut base = 0;
         for b in 0..num_blocks {
             let start = b * block_size;
             let end = std::cmp::min(start + block_size, n);
             let block = &data[start..end];
-            // head.fill(T::SENTINEL);
-            let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version);
+            let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version, base);
             let res = encode_block_result(block, c_opt, 0, version);
             encoded_blocks[b].write(res);
+            base += block_size;
         }
     } else {
         let chunk_size = num_blocks.div_ceil(threads);
@@ -1558,15 +1531,16 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
                     let mut head = vec![T::SENTINEL; LZV2_HASH_SIZE];
                     let mut prev = vec![T::SENTINEL; window_size];
                     let mut buffers = CompressBuffers::new();
+                    let mut base = 0;
                     for (j, slot) in chunk.iter_mut().enumerate() {
                         let b = start + j;
                         let block_start = b * block_size;
                         let block_end = std::cmp::min(block_start + block_size, n);
                         let block = &data[block_start..block_end];
-                        // head.fill(T::SENTINEL);
-                        let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version);
+                        let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version, base);
                         let res = encode_block_result(block, c_opt, 0, version);
                         slot.write(res);
+                        base += block_size;
                     }
                 });
             }
@@ -1948,41 +1922,53 @@ pub fn smart_compress_with_version(
     const PARALLEL_ONLY_THRESHOLD: usize = 1 << 20; // 1 MB
 
     if n >= PARALLEL_ONLY_THRESHOLD {
+        const SAMPLE_SIZE: usize = 256 * 1024;
+        let sample = if n > SAMPLE_SIZE { &data[..SAMPLE_SIZE] } else { data };
+        
         let mut block_cand = None;
         let mut shuf_blk_cand = None;
         let mut shuf2_blk_cand = None;
 
         std::thread::scope(|s| {
-            let h1 = s.spawn(|| deflate_blocked_encode_with_version(data, window_size, block_size, version));
+            let h1 = s.spawn(|| deflate_blocked_encode_with_version(sample, window_size, block_size, version));
             let h2 = if !skip_shuffle {
-                Some(s.spawn(move || {
-                    let shuf4 = byte_shuffle(data, 4);
+                Some(s.spawn(|| {
+                    let shuf4 = byte_shuffle(sample, 4);
                     deflate_blocked_encode_with_version(&shuf4, window_size, block_size, version)
                 }))
-            } else {
-                None
-            };
+            } else { None };
             let h3 = if !skip_shuffle {
-                Some(s.spawn(move || {
-                    let shuf2 = byte_shuffle(data, 2);
+                Some(s.spawn(|| {
+                    let shuf2 = byte_shuffle(sample, 2);
                     deflate_blocked_encode_with_version(&shuf2, window_size, block_size, version)
                 }))
-            } else {
-                None
-            };
+            } else { None };
 
             block_cand = h1.join().unwrap();
-            if let Some(h) = h2 {
-                shuf_blk_cand = h.join().unwrap();
-            }
-            if let Some(h) = h3 {
-                shuf2_blk_cand = h.join().unwrap();
-            }
+            if let Some(h) = h2 { shuf_blk_cand = h.join().unwrap(); }
+            if let Some(h) = h3 { shuf2_blk_cand = h.join().unwrap(); }
         });
 
-        consider(block_cand, CompressMethod::Blocked, &mut best);
-        consider(shuf_blk_cand, CompressMethod::ShuffleBlk, &mut best);
-        consider(shuf2_blk_cand, CompressMethod::Shuffle2Blk, &mut best);
+        let mut sample_best = None;
+        consider(block_cand, CompressMethod::Blocked, &mut sample_best);
+        consider(shuf_blk_cand, CompressMethod::ShuffleBlk, &mut sample_best);
+        consider(shuf2_blk_cand, CompressMethod::Shuffle2Blk, &mut sample_best);
+        
+        let best_method = sample_best.map(|(_, m)| m).unwrap_or(CompressMethod::Blocked);
+        
+        let final_cand = match best_method {
+            CompressMethod::Blocked => deflate_blocked_encode_with_version(data, window_size, block_size, version),
+            CompressMethod::ShuffleBlk => {
+                let shuf4 = byte_shuffle(data, 4);
+                deflate_blocked_encode_with_version(&shuf4, window_size, block_size, version)
+            }
+            CompressMethod::Shuffle2Blk => {
+                let shuf2 = byte_shuffle(data, 2);
+                deflate_blocked_encode_with_version(&shuf2, window_size, block_size, version)
+            }
+            _ => None,
+        };
+        return final_cand.map(|c| (c, best_method));
     } else {
         let mut plain_cand = None;
         let mut shuf_cand = None;

@@ -420,7 +420,7 @@ fn compress_stream_blocked<R: Read, W: Write, T: codec::TableIndex>(
                     let mut head = vec![T::SENTINEL; codec::LZV2_HASH_SIZE];
                     let mut prev = vec![T::SENTINEL; window_size];
                     let mut buffers = codec::CompressBuffers::new();
-                    let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version);
+                    let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version, 0);
                     codec::encode_block_result(block, c_opt, 0, format_version)
                 }));
             }
@@ -537,7 +537,7 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
                         let mut head = vec![T::SENTINEL; codec::LZV2_HASH_SIZE];
                         let mut prev = vec![T::SENTINEL; window_size];
                         let mut buffers = codec::CompressBuffers::new();
-                        let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version);
+                        let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version, 0);
                         let res = codec::encode_block_result(block, c_opt, *lane, format_version);
                         (*lane, res)
                     }));
@@ -573,7 +573,7 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
                     let mut head = vec![T::SENTINEL; codec::LZV2_HASH_SIZE];
                     let mut prev = vec![T::SENTINEL; window_size];
                     let mut buffers = codec::CompressBuffers::new();
-                    let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version);
+                    let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version, 0);
                     let res = codec::encode_block_result(block, c_opt, *lane, format_version);
                     (*lane, res)
                 }));
