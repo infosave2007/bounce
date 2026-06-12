@@ -138,72 +138,72 @@ fn huff_assign_lengths(
     let mut nodes = [FlatNode::default(); 576];
     let mut nodes_len = 0;
 
-    struct StackHeap {
-        data: [(usize, u16); 288],
-        len: usize,
-    }
-
-    impl StackHeap {
-        fn push(&mut self, val: (usize, u16)) {
-            let mut idx = self.len;
-            self.data[idx] = val;
-            self.len += 1;
-            while idx > 0 {
-                let parent = (idx - 1) / 2;
-                if self.data[idx].0 < self.data[parent].0 {
-                    self.data.swap(idx, parent);
-                    idx = parent;
-                } else {
-                    break;
-                }
-            }
-        }
-
-        fn pop(&mut self) -> (usize, u16) {
-            let res = self.data[0];
-            self.len -= 1;
-            if self.len > 0 {
-                self.data[0] = self.data[self.len];
-                let mut idx = 0;
-                while idx * 2 + 1 < self.len {
-                    let mut child = idx * 2 + 1;
-                    if child + 1 < self.len && self.data[child + 1].0 < self.data[child].0 {
-                        child += 1;
-                    }
-                    if self.data[child].0 < self.data[idx].0 {
-                        self.data.swap(idx, child);
-                        idx = child;
-                    } else {
-                        break;
-                    }
-                }
-            }
-            res
-        }
-    }
-
-    let mut heap = StackHeap {
-        data: [(0, 0); 288],
-        len: 0,
-    };
+    let mut leaves = [(0usize, 0u16); 288];
+    let mut num_leaves = 0;
 
     for sym in 0..alphabet_size {
         if freq[sym] > 0 {
-            let idx = nodes_len;
-            nodes[idx] = FlatNode {
-                freq: freq[sym],
-                sym: sym as i16,
-                left: None,
-                right: None,
-            };
-            nodes_len += 1;
-            heap.push((freq[sym], idx as u16));
+            leaves[num_leaves] = (freq[sym], sym as u16);
+            num_leaves += 1;
         }
     }
 
-    while heap.len > 1 {
-        let (f1, child1) = heap.pop();
-        let (f2, child2) = heap.pop();
+    if num_leaves == 0 {
+        return;
+    }
+    if num_leaves == 1 {
+        code_lens[leaves[0].1 as usize] = 1;
+        return;
+    }
+
+    leaves[..num_leaves].sort_unstable_by_key(|k| k.0);
+
+    for i in 0..num_leaves {
+        let (f, sym) = leaves[i];
+        let idx = nodes_len;
+        nodes[idx] = FlatNode {
+            freq: f,
+            sym: sym as i16,
+            left: None,
+            right: None,
+        };
+        leaves[i] = (f, idx as u16);
+        nodes_len += 1;
+    }
+
+    let mut q1_head = 0;
+    let mut q2_head = 0;
+    let mut q2_tail = 0;
+    let mut q2 = [(0usize, 0u16); 288];
+
+    while (num_leaves - q1_head) + (q2_tail - q2_head) > 1 {
+        let mut get_min = || {
+            if q1_head < num_leaves {
+                if q2_head < q2_tail {
+                    if leaves[q1_head].0 <= q2[q2_head].0 {
+                        let res = leaves[q1_head];
+                        q1_head += 1;
+                        res
+                    } else {
+                        let res = q2[q2_head];
+                        q2_head += 1;
+                        res
+                    }
+                } else {
+                    let res = leaves[q1_head];
+                    q1_head += 1;
+                    res
+                }
+            } else {
+                let res = q2[q2_head];
+                q2_head += 1;
+                res
+            }
+        };
+
+        let (f1, child1) = get_min();
+        let (f2, child2) = get_min();
+
         let merged_freq = f1 + f2;
         let merged_idx = nodes_len;
         nodes[merged_idx] = FlatNode {
@@ -213,10 +213,11 @@ fn huff_assign_lengths(
             right: Some(child2),
         };
         nodes_len += 1;
-        heap.push((merged_freq, merged_idx as u16));
+        q2[q2_tail] = (merged_freq, merged_idx as u16);
+        q2_tail += 1;
     }
 
-    let root = heap.pop().1 as usize;
+    let root = if q1_head < num_leaves { leaves[q1_head].1 } else { q2[q2_head].1 } as usize;
 
     let mut stack = [(0u16, 0u8); 576];
     let mut stack_len = 0;
@@ -427,6 +428,7 @@ fn decode_code_lens(encoded: &[u8], out: &mut [u8]) -> Result<(), String> {
     let mut prev = None;
 
     while i < out.len() {
+        reader.fill();
         let sym = reader.peek(5);
         reader.consume(5);
 
@@ -582,55 +584,42 @@ impl<'a> BitReader<'a> {
 
     #[inline(always)]
     fn fill(&mut self) {
-        if self.bits_left <= 56 {
-            let bytes_to_take = (64 - self.bits_left) / 8;
-            if bytes_to_take > 0 && self.idx + 8 <= self.data.len() {
+        if self.idx + 7 < self.data.len() {
+            let bytes_to_take = (63 - self.bits_left) / 8;
+            if bytes_to_take > 0 {
                 let v = u64::from_be_bytes(self.data[self.idx..self.idx + 8].try_into().unwrap());
                 let shift = 64 - bytes_to_take * 8;
-                if bytes_to_take == 8 {
-                    self.bit_buf = v;
-                } else {
-                    self.bit_buf = (self.bit_buf << (bytes_to_take * 8)) | (v >> shift);
-                }
+                self.bit_buf = (self.bit_buf << (bytes_to_take * 8)) | (v >> shift);
                 self.bits_left += bytes_to_take * 8;
                 self.idx += bytes_to_take;
-            } else {
-                let available = self.data.len() - self.idx;
-                let to_read = std::cmp::min(bytes_to_take, available);
-                for _ in 0..to_read {
-                    self.bit_buf = (self.bit_buf << 8) | (self.data[self.idx] as u64);
-                    self.bits_left += 8;
-                    self.idx += 1;
-                }
             }
+        } else {
+            self.fill_slow();
+        }
+    }
+
+    #[cold]
+    fn fill_slow(&mut self) {
+        let bytes_to_take = (64 - self.bits_left) / 8;
+        let available = self.data.len() - self.idx;
+        let to_read = std::cmp::min(bytes_to_take, available);
+        for _ in 0..to_read {
+            self.bit_buf = (self.bit_buf << 8) | (self.data[self.idx] as u64);
+            self.bits_left += 8;
+            self.idx += 1;
         }
     }
 
     #[inline(always)]
-    fn peek(&mut self, n: usize) -> u32 {
-        if self.bits_left < n {
-            self.fill();
-        }
-        if self.bits_left == 0 {
-            return 0;
-        }
-        if self.bits_left >= n {
-            let shift_amt = self.bits_left - n;
-            let mask = (1u64 << n) - 1;
-            ((self.bit_buf >> shift_amt) & mask) as u32
-        } else {
-            let mask = (1u64 << self.bits_left) - 1;
-            ((self.bit_buf & mask) << (n - self.bits_left)) as u32
-        }
+    fn peek(&self, n: usize) -> u32 {
+        let shift_amt = self.bits_left.saturating_sub(n);
+        let mask = (1u32 << n) - 1;
+        ((self.bit_buf >> shift_amt) as u32) & mask
     }
 
     #[inline(always)]
     fn consume(&mut self, n: usize) {
-        if self.bits_left >= n {
-            self.bits_left -= n;
-        } else {
-            self.bits_left = 0;
-        }
+        self.bits_left = self.bits_left.saturating_sub(n);
     }
 }
 
@@ -875,6 +864,7 @@ fn huff_decode(data: &[u8], expected_len: usize) -> Result<Vec<u8>, String> {
     let mut reader = BitReader::new(bitstream);
 
     while out.len() < expected_len {
+        reader.fill();
         let peek15 = reader.peek(15) as usize;
         let root_idx = peek15 >> 4;
         let entry = unsafe { *root_table.get_unchecked(root_idx) };
@@ -1202,7 +1192,8 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
             pack_extra_bits(len_extra, len_n_extra);
             pack_extra_bits(dist_extra, dist_n_extra);
 
-            for j in 1..best_len {
+            let step = if best_len >= 64 { 4 } else { 1 };
+            for j in (1..best_len).step_by(step) {
                 if i + j + LZV2_MIN_MATCH <= n {
                     let h = lzv2_hash(data, i + j) as usize;
                     prev[(base + i + j) & (window_size - 1)] = head[h];
@@ -1319,6 +1310,7 @@ pub(crate) fn deflate_style_decode_with_version(data: &[u8], expected_len: usize
     let mut di = 0;
 
     for _ in 0..num_syms {
+        reader.fill();
         let peek15 = reader.peek(15) as usize;
         let root_idx = peek15 >> 4;
         let entry = unsafe { *root_table.get_unchecked(root_idx) };
@@ -1363,20 +1355,28 @@ pub(crate) fn deflate_style_decode_with_version(data: &[u8], expected_len: usize
             if dist > out.len() {
                 return Err(format!("deflateStyle: bad dist {}", dist));
             }
-            if dist >= ml {
-                let start = out.len() - dist;
-                out.extend_from_within(start..start + ml);
-            } else if dist == 1 {
-                let last = *out.last().unwrap();
-                out.resize(out.len() + ml, last);
-            } else {
-                let start = out.len() - dist;
-                let mut copied = 0;
-                while copied < ml {
-                    let take = (dist + copied).min(ml - copied);
-                    out.extend_from_within(start..start + take);
-                    copied += take;
+            out.reserve(ml + 8);
+            let dst_orig = out.len();
+            let mut src = dst_orig - dist;
+            let mut dst = dst_orig;
+            let end = dst_orig + ml;
+            unsafe {
+                if dist < 8 {
+                    let mut c = 0;
+                    while c < 8 {
+                        let take = std::cmp::min(dist, 8 - c);
+                        std::ptr::copy_nonoverlapping(out.as_ptr().add(src + (c % dist)), out.as_mut_ptr().add(dst + c), take);
+                        c += take;
+                    }
+                    src = dst_orig;
+                    dst += 8;
                 }
+                while dst < end {
+                    std::ptr::copy_nonoverlapping(out.as_ptr().add(src), out.as_mut_ptr().add(dst), 8);
+                    src += 8;
+                    dst += 8;
+                }
+                out.set_len(end);
             }
         }
     }
