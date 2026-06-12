@@ -15,13 +15,35 @@ if [[ -z "$BOUNCE" ]]; then
     BOUNCE="$BOUNCE_DIR/target/release/bounce"
 fi
 
-# Dependency check
-for cmd in curl unzip gzip lz4 zstd bzip2 brotli "$BOUNCE"; do
+# Auto-install dependencies if missing
+MISSING=()
+for cmd in curl unzip gzip lz4 zstd bzip2 brotli; do
     if ! command -v "$cmd" &> /dev/null; then
-        echo "Error: Required command '$cmd' is not installed."
-        exit 1
+        MISSING+=("$cmd")
     fi
 done
+
+if [ ${#MISSING[@]} -gt 0 ]; then
+    echo "Installing missing dependencies: ${MISSING[*]}..."
+    if command -v brew &> /dev/null; then
+        brew install "${MISSING[@]}" || { echo "Failed to install dependencies with brew."; exit 1; }
+    elif command -v apt-get &> /dev/null; then
+        sudo apt-get update && sudo apt-get install -y "${MISSING[@]}" || { echo "Failed to install dependencies with apt-get."; exit 1; }
+    else
+        echo "Error: Could not find 'brew' or 'apt-get' to install missing dependencies (${MISSING[*]}). Please install them manually."
+        exit 1
+    fi
+fi
+
+if [[ ! -f "$BOUNCE" ]]; then
+    echo "Building bounce..."
+    cargo build --release || { echo "Failed to build bounce. Is Rust installed?"; exit 1; }
+    if [[ "$(uname -m)" == "arm64" && "$(uname -s)" == "Darwin" && -f "$BOUNCE_DIR/target/aarch64-apple-darwin/release/bounce" ]]; then
+        BOUNCE="$BOUNCE_DIR/target/aarch64-apple-darwin/release/bounce"
+    else
+        BOUNCE="$BOUNCE_DIR/target/release/bounce"
+    fi
+fi
 
 BENCH_DIR="$BOUNCE_DIR/.bench_public"
 mkdir -p "$BENCH_DIR"
