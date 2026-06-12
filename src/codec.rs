@@ -612,9 +612,14 @@ impl<'a> BitReader<'a> {
 
     #[inline(always)]
     fn peek(&self, n: usize) -> u32 {
-        let shift_amt = self.bits_left.saturating_sub(n);
-        let mask = (1u32 << n) - 1;
-        ((self.bit_buf >> shift_amt) as u32) & mask
+        if self.bits_left >= n {
+            let shift_amt = self.bits_left - n;
+            let mask = (1u32 << n) - 1;
+            ((self.bit_buf >> shift_amt) as u32) & mask
+        } else {
+            let mask = (1u64 << self.bits_left) - 1;
+            ((self.bit_buf & mask) << (n - self.bits_left)) as u32
+        }
     }
 
     #[inline(always)]
@@ -1361,20 +1366,25 @@ pub(crate) fn deflate_style_decode_with_version(data: &[u8], expected_len: usize
             let mut dst = dst_orig;
             let end = dst_orig + ml;
             unsafe {
-                if dist < 8 {
-                    let mut c = 0;
-                    while c < 8 {
-                        let take = std::cmp::min(dist, 8 - c);
-                        std::ptr::copy_nonoverlapping(out.as_ptr().add(src + (c % dist)), out.as_mut_ptr().add(dst + c), take);
-                        c += take;
+                if dist == 1 {
+                    let v = *out.as_ptr().add(src) as u64;
+                    let v8 = v * 0x0101010101010101;
+                    while dst < end {
+                        std::ptr::write_unaligned(out.as_mut_ptr().add(dst) as *mut u64, v8);
+                        dst += 8;
                     }
-                    src = dst_orig;
-                    dst += 8;
-                }
-                while dst < end {
-                    std::ptr::copy_nonoverlapping(out.as_ptr().add(src), out.as_mut_ptr().add(dst), 8);
-                    src += 8;
-                    dst += 8;
+                } else if dist < 8 {
+                    while dst < end {
+                        *out.as_mut_ptr().add(dst) = *out.as_ptr().add(src);
+                        src += 1;
+                        dst += 1;
+                    }
+                } else {
+                    while dst < end {
+                        std::ptr::copy_nonoverlapping(out.as_ptr().add(src), out.as_mut_ptr().add(dst), 8);
+                        src += 8;
+                        dst += 8;
+                    }
                 }
                 out.set_len(end);
             }
