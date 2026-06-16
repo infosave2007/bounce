@@ -645,8 +645,11 @@ pub fn create(
     } else {
         32768usize.checked_shl(level as u32).unwrap_or(usize::MAX / 2)
     };
+    // Level 1 uses 256 KB blocks: at 128 KB the per-block Huffman tables cost ~1 pp
+    // on text (hundreds of trees over a large file); 256 KB roughly halves that
+    // overhead for only ~5% more time, while staying fully parallel.
     let block_size = if level == 1 {
-        131072
+        262144
     } else {
         65536usize.checked_shl(level as u32).unwrap_or(usize::MAX / 2)
     };
@@ -798,6 +801,11 @@ pub fn create(
                 let mut crc = 0u32;
                 let mut orig_size = 0u64;
 
+                // Cap block size per method family (see codec::MAX_*_BLOCK_SIZE).
+                // Self-describing block headers keep this transparent to the decoder.
+                let plain_block = block_size.min(codec::MAX_PLAIN_BLOCK_SIZE);
+                let shuffle_block = block_size.min(codec::MAX_SHUFFLE_BLOCK_SIZE);
+
                 if window_size <= 65536 {
                     if method == codec::CompressMethod::Blocked {
                         let mut reader = BufReader::with_capacity(2 * 1024 * 1024, file);
@@ -805,7 +813,7 @@ pub fn create(
                             &mut reader,
                             &mut w,
                             window_size,
-                            block_size,
+                            plain_block,
                             format_version,
                             &mut crc,
                             &mut orig_size,
@@ -823,7 +831,7 @@ pub fn create(
                             file_size,
                             stride,
                             window_size,
-                            block_size,
+                            shuffle_block,
                             format_version,
                             &mut crc,
                             &mut orig_size,
@@ -838,7 +846,7 @@ pub fn create(
                         &mut reader,
                         &mut w,
                         window_size,
-                        block_size,
+                        plain_block,
                         format_version,
                         &mut crc,
                         &mut orig_size,
@@ -856,7 +864,7 @@ pub fn create(
                         file_size,
                         stride,
                         window_size,
-                        block_size,
+                        shuffle_block,
                         format_version,
                         &mut crc,
                         &mut orig_size,

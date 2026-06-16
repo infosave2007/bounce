@@ -1430,6 +1430,19 @@ pub(crate) fn deflate_style_decode_with_version(data: &[u8], expected_len: usize
 
 pub(crate) const BLOCK_SIZE: usize = 128 * 1024; // 128KB blocks
 
+// Block-size caps applied at encode time. Block boundaries are self-describing in
+// the stream (each block carries its own comp/orig sizes), so capping only affects
+// the encoder and never breaks decode of existing or new archives.
+//
+// Plain/blocked (e.g. text): large blocks amortize per-block Huffman-table overhead,
+// so we allow up to 8 MB — beyond that the ratio is flat while a single giant block
+// kills parallelism. Shuffle modes (e.g. float weights) are the opposite: each block
+// gets one Huffman tree, and a block spanning many stride-lanes mixes incompatible
+// byte distributions into that tree, hurting the ratio. Keeping shuffle blocks small
+// lets each tree fit a homogeneous slice.
+pub(crate) const MAX_PLAIN_BLOCK_SIZE: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_SHUFFLE_BLOCK_SIZE: usize = 1024 * 1024;
+
 // Number of worker threads to use for a given amount of work.
 fn num_threads(work: usize) -> usize {
     if work <= 1 {
@@ -1944,6 +1957,10 @@ pub fn smart_compress_with_version(
     }
 
     let skip_shuffle = estimate_entropy(data) > 7.5;
+    // Cap block size per method family (see MAX_*_BLOCK_SIZE). Never enlarges the
+    // caller's block_size, so low levels (small blocks) are unaffected.
+    let plain_block = block_size.min(MAX_PLAIN_BLOCK_SIZE);
+    let shuffle_block = block_size.min(MAX_SHUFFLE_BLOCK_SIZE);
     let mut best: Option<(Vec<u8>, CompressMethod)> = None;
 
     let consider = |cand: Option<Vec<u8>>, m: CompressMethod, best: &mut Option<(Vec<u8>, CompressMethod)>| {
@@ -1993,14 +2010,14 @@ pub fn smart_compress_with_version(
         let best_method = sample_best.map(|(_, m)| m).unwrap_or(CompressMethod::Blocked);
         
         let final_cand = match best_method {
-            CompressMethod::Blocked => deflate_blocked_encode_with_version(data, window_size, block_size, version),
+            CompressMethod::Blocked => deflate_blocked_encode_with_version(data, window_size, plain_block, version),
             CompressMethod::ShuffleBlk => {
                 let shuf4 = byte_shuffle(data, 4);
-                deflate_blocked_encode_with_version(&shuf4, window_size, block_size, version)
+                deflate_blocked_encode_with_version(&shuf4, window_size, shuffle_block, version)
             }
             CompressMethod::Shuffle2Blk => {
                 let shuf2 = byte_shuffle(data, 2);
-                deflate_blocked_encode_with_version(&shuf2, window_size, block_size, version)
+                deflate_blocked_encode_with_version(&shuf2, window_size, shuffle_block, version)
             }
             _ => None,
         };
@@ -2032,23 +2049,23 @@ pub fn smart_compress_with_version(
                 None
             };
 
-            let h_blk = if n >= block_size {
-                Some(s.spawn(move || deflate_blocked_encode_with_version(data, window_size, block_size, version)))
+            let h_blk = if n >= plain_block {
+                Some(s.spawn(move || deflate_blocked_encode_with_version(data, window_size, plain_block, version)))
             } else {
                 None
             };
-            let h_shuf_blk = if n >= block_size && !skip_shuffle {
+            let h_shuf_blk = if n >= shuffle_block && !skip_shuffle {
                 Some(s.spawn(move || {
                     let shuf4 = byte_shuffle(data, 4);
-                    deflate_blocked_encode_with_version(&shuf4, window_size, block_size, version)
+                    deflate_blocked_encode_with_version(&shuf4, window_size, shuffle_block, version)
                 }))
             } else {
                 None
             };
-            let h_shuf2_blk = if n >= block_size && !skip_shuffle {
+            let h_shuf2_blk = if n >= shuffle_block && !skip_shuffle {
                 Some(s.spawn(move || {
                     let shuf2 = byte_shuffle(data, 2);
-                    deflate_blocked_encode_with_version(&shuf2, window_size, block_size, version)
+                    deflate_blocked_encode_with_version(&shuf2, window_size, shuffle_block, version)
                 }))
             } else {
                 None

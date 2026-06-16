@@ -100,22 +100,6 @@ bounce <command> [options] <archive> [files...]
 | `-v, --verbose` | Show progress details for each file |
 | `-q, --quiet` | Suppress summary line output |
 
-### Compression Levels Example
-
-*Effect of compression levels on a 61.7 MB highly compressed video file (`.mp4`):*
-
-| Level | Window / Block Size | Compressed Size | Ratio |
-|-------|---------------------|-----------------|-------|
-| `-1` | 64 KB / 128 KB | 61.5 MB | 99.7% |
-| `-2` | 128 KB / 128 KB | 61.4 MB | 99.6% |
-| `-3` | 256 KB / 256 KB | 61.4 MB | 99.6% |
-| `-5` | 1 MB / 1 MB | 61.4 MB | 99.6% |
-| `-6` | 2 MB / 2 MB | 61.4 MB | 99.6% |
-| `-7` | 4 MB / 4 MB | 61.4 MB | 99.6% |
-| `-8` | 8 MB / 8 MB | 61.4 MB | 99.6% |
-| `-9` | 16 MB / 16 MB | 61.4 MB | 99.6% |
-| `-10`| 32 MB / 32 MB | 61.4 MB | 99.6% |
-
 ### Examples
 
 **Compress files and directories:**
@@ -170,78 +154,78 @@ Run benchmarks locally using: `bash benchmark.sh`
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **34.6 MB** | **36.2%** | **189.1 MB/s** | **988.7 MB/s** |
-| zstd -3 | 33.8 MB | 35.4% | 753.3 MB/s | 823.6 MB/s |
-| gzip -9 | 34.8 MB | 36.5% | 32.1 MB/s | 653.5 MB/s |
-| lz4 -9 | 40.3 MB | 42.3% | 240.9 MB/s | 1210.9 MB/s |
-| zstd -19 | 25.7 MB | 26.9% | 5.5 MB/s | 789.3 MB/s |
-| bzip2 -9 | 27.7 MB | 29.0% | 22.2 MB/s | 54.9 MB/s |
-| brotli -q 11 | 24.5 MB | 25.7% | 0.8 MB/s | 518.3 MB/s |
+| **bounce -2** | **34.6 MB** | **36.2%** | **195.0 MB/s** | **934.3 MB/s** |
+| zstd -3 | 33.8 MB | 35.4% | 209.2 MB/s | 1050.0 MB/s |
+| gzip -9 | 34.8 MB | 36.5% | 34.4 MB/s | 800.3 MB/s |
+| lz4 -9 | 40.3 MB | 42.3% | 161.4 MB/s | 1844.3 MB/s |
+| zstd -19 | 25.7 MB | 26.9% | 5.7 MB/s | 1035.3 MB/s |
+| bzip2 -9 | 27.7 MB | 29.0% | 22.8 MB/s | 58.4 MB/s |
+| brotli -q 11 | 24.5 MB | 25.7% | 0.8 MB/s | 568.9 MB/s |
 
 ### Safetensors Model Weights — 255.5 MB (`model.safetensors`)
 *IEEE-754 neural network weights. Demonstrates the effectiveness of the byte-shuffle transform.*
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **218.1 MB** | **85.3%** | **179.3 MB/s** | **1071.2 MB/s** |
-| zstd -3 | 235.3 MB | 92.1% | 2056.8 MB/s | 1035.1 MB/s |
-| gzip -9 | 235.6 MB | 92.2% | 39.2 MB/s | 481.2 MB/s |
-| lz4 -9 | 255.5 MB | 100.0% | 381.3 MB/s | 2889.1 MB/s |
-| zstd -19 | 235.2 MB | 92.1% | 32.9 MB/s | 1055.0 MB/s |
-| bzip2 -9 | 241.5 MB | 94.5% | 15.8 MB/s | 31.9 MB/s |
-| brotli -q 5 | 235.1 MB | 92.0% | 195.2 MB/s | 206.5 MB/s |
+| **bounce -2** | **218.1 MB** | **85.3%** | **172.4 MB/s** | **1069.0 MB/s** |
+| zstd -3 | 235.3 MB | 92.1% | 2235.9 MB/s | 1121.8 MB/s |
+| gzip -9 | 235.6 MB | 92.2% | 38.6 MB/s | 492.9 MB/s |
+| lz4 -9 | 255.5 MB | 100.0% | 371.8 MB/s | 3668.9 MB/s |
+| zstd -19 | 235.2 MB | 92.1% | 30.6 MB/s | 1138.6 MB/s |
+| bzip2 -9 | 241.5 MB | 94.5% | 15.8 MB/s | 32.2 MB/s |
+| brotli -q 5 | 235.1 MB | 92.0% | 199.4 MB/s | 212.6 MB/s |
 
 ### Silesia Corpus (Mixed/Code) — 202.2 MB (`silesia.tar`)
 *A mixed corpus of source code, book text, binaries, and database files.*
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **65.4 MB** | **32.3%** | **250.6 MB/s** | **997.7 MB/s** |
-| zstd -3 | 63.2 MB | 31.3% | 1337.3 MB/s | 1150.3 MB/s |
-| gzip -9 | 64.5 MB | 31.9% | 19.5 MB/s | 896.2 MB/s |
-| lz4 -9 | 74.4 MB | 36.8% | 252.7 MB/s | 1848.5 MB/s |
-| zstd -19 | 50.4 MB | 24.9% | 13.9 MB/s | 1138.6 MB/s |
-| bzip2 -9 | 52.0 MB | 25.7% | 20.8 MB/s | 64.2 MB/s |
-| brotli -q 11 | 47.5 MB | 23.5% | 0.8 MB/s | 520.4 MB/s |
+| **bounce -2** | **65.4 MB** | **32.3%** | **256.6 MB/s** | **953.1 MB/s** |
+| zstd -3 | 63.2 MB | 31.3% | 1541.6 MB/s | 1307.3 MB/s |
+| gzip -9 | 64.5 MB | 31.9% | 19.4 MB/s | 972.1 MB/s |
+| lz4 -9 | 74.4 MB | 36.8% | 252.6 MB/s | 2248.4 MB/s |
+| zstd -19 | 50.4 MB | 24.9% | 14.0 MB/s | 1303.0 MB/s |
+| bzip2 -9 | 52.0 MB | 25.7% | 20.9 MB/s | 64.7 MB/s |
+| brotli -q 11 | 47.5 MB | 23.5% | 0.8 MB/s | 560.1 MB/s |
 
 ### Database Dump (SQL) — 164.3 MB (`employees.sql`)
 *A concatenated, inlined SQL dump of MySQL sample database containing real employees records.*
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **35.1 MB** | **21.3%** | **166.3 MB/s** | **1190.1 MB/s** |
-| zstd -3 | 37.9 MB | 23.1% | 1286.2 MB/s | 935.9 MB/s |
-| gzip -9 | 33.2 MB | 20.2% | 7.6 MB/s | 1121.7 MB/s |
-| lz4 -9 | 46.9 MB | 28.5% | 108.0 MB/s | 1679.0 MB/s |
-| zstd -19 | 18.4 MB | 11.2% | 5.6 MB/s | 1382.4 MB/s |
-| bzip2 -9 | 25.5 MB | 15.5% | 24.0 MB/s | 85.0 MB/s |
-| brotli -q 11 | 17.1 MB | 10.4% | 0.8 MB/s | 732.1 MB/s |
+| **bounce -2** | **35.1 MB** | **21.3%** | **168.7 MB/s** | **1141.0 MB/s** |
+| zstd -3 | 37.9 MB | 23.1% | 1671.0 MB/s | 1076.9 MB/s |
+| gzip -9 | 33.2 MB | 20.2% | 7.6 MB/s | 1318.1 MB/s |
+| lz4 -9 | 46.9 MB | 28.5% | 114.3 MB/s | 2168.5 MB/s |
+| zstd -19 | 18.4 MB | 11.2% | 5.6 MB/s | 1721.2 MB/s |
+| bzip2 -9 | 25.5 MB | 15.5% | 24.2 MB/s | 86.6 MB/s |
+| brotli -q 11 | 17.1 MB | 10.4% | 0.7 MB/s | 822.1 MB/s |
 
 ### Structured Data (JSON) — 181.0 MB (`citylots.json`)
 *Large structured JSON dataset containing geographical features of San Francisco city lots.*
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **19.0 MB** | **10.5%** | **468.4 MB/s** | **1483.1 MB/s** |
-| zstd -3 | 17.7 MB | 9.8% | 1916.6 MB/s | 1795.7 MB/s |
-| gzip -9 | 21.2 MB | 11.7% | 46.4 MB/s | 1733.4 MB/s |
-| lz4 -9 | 23.6 MB | 13.1% | 576.7 MB/s | 2092.8 MB/s |
-| zstd -19 | 12.3 MB | 6.8% | 14.4 MB/s | 2124.8 MB/s |
-| bzip2 -9 | 17.8 MB | 9.8% | 13.9 MB/s | 103.5 MB/s |
-| brotli -q 11 | 11.9 MB | 6.6% | 1.3 MB/s | 1173.3 MB/s |
+| **bounce -2** | **19.0 MB** | **10.5%** | **452.1 MB/s** | **1375.4 MB/s** |
+| zstd -3 | 17.7 MB | 9.8% | 2558.5 MB/s | 2303.5 MB/s |
+| gzip -9 | 21.2 MB | 11.7% | 46.8 MB/s | 2191.9 MB/s |
+| lz4 -9 | 23.6 MB | 13.1% | 628.2 MB/s | 2746.0 MB/s |
+| zstd -19 | 12.3 MB | 6.8% | 14.4 MB/s | 2802.1 MB/s |
+| bzip2 -9 | 17.8 MB | 9.8% | 14.1 MB/s | 104.1 MB/s |
+| brotli -q 11 | 11.9 MB | 6.6% | 1.3 MB/s | 1367.3 MB/s |
 
 ### Compressed Video (Fallback Test) — 61.7 MB (`video.mp4`)
 *H.264 compressed video. Already compressed high-entropy file to test safety/fallback detection at maximum level (-9).*
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -9** | **61.4 MB** | **99.6%** | **178.7 MB/s** | **283.0 MB/s** |
-| zstd -3 | 61.6 MB | 99.8% | 932.9 MB/s | 1504.3 MB/s |
-| gzip -9 | 61.5 MB | 99.7% | 57.2 MB/s | 721.0 MB/s |
-| lz4 -9 | 61.6 MB | 99.9% | 302.7 MB/s | 1274.0 MB/s |
-| zstd -19 | 61.2 MB | 99.2% | 14.9 MB/s | 1224.9 MB/s |
-| bzip2 -9 | 61.6 MB | 99.9% | 15.2 MB/s | 31.5 MB/s |
-| brotli -q 5 | 61.5 MB | 99.8% | 500.7 MB/s | 1329.5 MB/s |
+| **bounce -9** | **61.4 MB** | **99.6%** | **204.8 MB/s** | **564.8 MB/s** |
+| zstd -3 | 61.6 MB | 99.8% | 1595.0 MB/s | 2957.4 MB/s |
+| gzip -9 | 61.5 MB | 99.7% | 58.6 MB/s | 950.1 MB/s |
+| lz4 -9 | 61.6 MB | 99.9% | 325.2 MB/s | 2171.2 MB/s |
+| zstd -19 | 61.2 MB | 99.2% | 14.8 MB/s | 2099.5 MB/s |
+| bzip2 -9 | 61.6 MB | 99.9% | 15.2 MB/s | 31.7 MB/s |
+| brotli -q 5 | 61.5 MB | 99.8% | 608.5 MB/s | 2367.1 MB/s |
 
 ---
 

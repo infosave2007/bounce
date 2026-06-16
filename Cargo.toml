@@ -1,6 +1,6 @@
 [package]
 name = "nvg-bounce"
-version = "1.0.6"
+version = "1.0.7"
 edition = "2021"
 description = "A high-performance, zero-dependency file archiver built on the NVG-bounce cosmological architecture"
 license = "Apache-2.0"
