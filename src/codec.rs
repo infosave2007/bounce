@@ -1041,6 +1041,7 @@ pub fn deflate_style_encode_with_version(data: &[u8], window_size: usize, versio
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
     data: &[u8],
     head: &mut [T],
