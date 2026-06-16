@@ -383,6 +383,7 @@ fn compress_stream_blocked<R: Read, W: Write, T: codec::TableIndex>(
 ) -> io::Result<()> {
     let start_time = std::time::Instant::now();
     let mut stored_size = 0u64;
+    let (hash_bits, hash_size) = codec::get_hash_params(window_size);
 
     let concurrency = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let batch_size = concurrency * 4;
@@ -417,10 +418,10 @@ fn compress_stream_blocked<R: Read, W: Write, T: codec::TableIndex>(
             let mut handles = Vec::with_capacity(batch.len());
             for block in &batch {
                 handles.push(s.spawn(move || {
-                    let mut head = vec![T::SENTINEL; codec::LZV2_HASH_SIZE];
+                    let mut head = vec![T::SENTINEL; hash_size];
                     let mut prev = vec![T::SENTINEL; window_size];
                     let mut buffers = codec::CompressBuffers::new();
-                    let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version, 0);
+                    let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version, 0, hash_bits);
                     codec::encode_block_result(block, c_opt, 0, format_version)
                 }));
             }
@@ -458,6 +459,7 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
     file_name: &str,
 ) -> io::Result<()> {
     let groups = file_size / (stride as u64);
+    let (hash_bits, hash_size) = codec::get_hash_params(window_size);
     let mut prev_byte = [0u8; 4];
 
     // Buffer for each lane before compression
@@ -534,10 +536,10 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
                 let mut handles = Vec::with_capacity(blocks_to_compress.len());
                 for (lane, block) in &blocks_to_compress {
                     handles.push(scope.spawn(move || {
-                        let mut head = vec![T::SENTINEL; codec::LZV2_HASH_SIZE];
+                        let mut head = vec![T::SENTINEL; hash_size];
                         let mut prev = vec![T::SENTINEL; window_size];
                         let mut buffers = codec::CompressBuffers::new();
-                        let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version, 0);
+                        let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version, 0, hash_bits);
                         let res = codec::encode_block_result(block, c_opt, *lane, format_version);
                         (*lane, res)
                     }));
@@ -570,10 +572,10 @@ fn compress_stream_shuffled_blocked<R: Read, W: Write, T: codec::TableIndex>(
             let mut handles = Vec::with_capacity(final_blocks.len());
             for (lane, block) in &final_blocks {
                 handles.push(scope.spawn(move || {
-                    let mut head = vec![T::SENTINEL; codec::LZV2_HASH_SIZE];
+                    let mut head = vec![T::SENTINEL; hash_size];
                     let mut prev = vec![T::SENTINEL; window_size];
                     let mut buffers = codec::CompressBuffers::new();
-                    let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version, 0);
+                    let c_opt = codec::deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, format_version, 0, hash_bits);
                     let res = codec::encode_block_result(block, c_opt, *lane, format_version);
                     (*lane, res)
                 }));

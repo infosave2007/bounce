@@ -959,7 +959,18 @@ const LZV2_MIN_MATCH: usize = 3;
 const LZV2_MAX_MATCH: usize = 258;
 const LZV2_MAX_CHAIN: usize = 256;
 
-fn lzv2_hash(data: &[u8], pos: usize) -> u32 {
+pub fn get_hash_params(window_size: usize) -> (usize, usize) {
+    let hash_bits = match window_size {
+        w if w <= 65536 => 16,
+        131072 => 17,
+        262144 => 18,
+        524288 => 19,
+        _ => 20,
+    };
+    (hash_bits, 1 << hash_bits)
+}
+
+fn lzv2_hash(data: &[u8], pos: usize, hash_bits: usize) -> u32 {
     if pos + 3 >= data.len() {
         let mut val = 0u32;
         let rem = data.len() - pos;
@@ -970,10 +981,10 @@ fn lzv2_hash(data: &[u8], pos: usize) -> u32 {
         } else if rem == 1 {
             val = data[pos] as u32;
         }
-        return val.wrapping_mul(0x1E35A7BD) >> (32 - LZV2_HASH_BITS);
+        return val.wrapping_mul(0x1E35A7BD) >> (32 - hash_bits);
     }
     let val = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-    val.wrapping_mul(0x1E35A7BD) >> (32 - LZV2_HASH_BITS)
+    val.wrapping_mul(0x1E35A7BD) >> (32 - hash_bits)
 }
 
 #[inline(always)]
@@ -1018,14 +1029,15 @@ impl CompressBuffers {
 
 pub fn deflate_style_encode_with_version(data: &[u8], window_size: usize, version: u8) -> Option<Vec<u8>> {
     let mut buffers = CompressBuffers::new();
+    let (hash_bits, hash_size) = get_hash_params(window_size);
     if window_size <= 65536 && data.len() <= 65536 {
-        let mut head = vec![u16::MAX; LZV2_HASH_SIZE];
+        let mut head = vec![u16::MAX; hash_size];
         let mut prev = vec![u16::MAX; window_size];
-        deflate_style_encode_with_buffers(data, &mut head, &mut prev, &mut buffers, window_size, version, 0)
+        deflate_style_encode_with_buffers(data, &mut head, &mut prev, &mut buffers, window_size, version, 0, hash_bits)
     } else {
-        let mut head = vec![u32::MAX; LZV2_HASH_SIZE];
+        let mut head = vec![u32::MAX; hash_size];
         let mut prev = vec![u32::MAX; window_size];
-        deflate_style_encode_with_buffers(data, &mut head, &mut prev, &mut buffers, window_size, version, 0)
+        deflate_style_encode_with_buffers(data, &mut head, &mut prev, &mut buffers, window_size, version, 0, hash_bits)
     }
 }
 
@@ -1037,11 +1049,23 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
     window_size: usize,
     version: u8,
     base: usize,
+    hash_bits: usize,
 ) -> Option<Vec<u8>> {
     let n = data.len();
     if n < 128 {
         return None;
     }
+
+    let max_chain_limit = match window_size {
+        w if w <= 65536 => 128,
+        131072 => 256,
+        262144 => 512,
+        524288 => 1024,
+        1048576 => 1536,
+        2097152 => 2048,
+        4194304 => 3072,
+        _ => 4096,
+    };
 
     buffers.symbols.clear();
     buffers.dist_codes.clear();
@@ -1070,20 +1094,20 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
     const GOOD_MATCH: usize = 32;
     while i < n {
         if i + 64 < n {
-            let h_next = lzv2_hash(data, i + 64) as usize;
+            let h_next = lzv2_hash(data, i + 64, hash_bits) as usize;
             unsafe { std::ptr::read_volatile(&head[h_next]) };
         }
         let mut best_len = 0;
         let mut best_dist = 0;
         if i + LZV2_MIN_MATCH <= n {
-            let h = lzv2_hash(data, i) as usize;
+            let h = lzv2_hash(data, i, hash_bits) as usize;
             let mut pos = head[h];
             prev[(base + i) & (window_size - 1)] = pos;
             head[h] = T::from_usize(base + i);
-            let min_pos = (base + i).saturating_sub(window_size).max(base);
+            let min_pos = (base + i).saturating_sub(window_size.min(65536)).max(base);
             let mut cl = 0;
-            let mut max_chain = LZV2_MAX_CHAIN;
-            while !pos.is_sentinel() && pos.to_usize() >= min_pos && cl < max_chain {
+            let mut search_depth = max_chain_limit;
+            while !pos.is_sentinel() && pos.to_usize() >= min_pos && cl < search_depth {
                 let p = pos.to_usize() - base;
                 let mut limit = n - i;
                 if limit > LZV2_MAX_MATCH {
@@ -1101,9 +1125,9 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
                             break;
                         }
                         if l >= 32 {
-                            max_chain = LZV2_MAX_CHAIN / 8;
+                            search_depth = max_chain_limit / 8;
                         } else if l >= 8 {
-                            max_chain = LZV2_MAX_CHAIN / 2;
+                            search_depth = max_chain_limit / 2;
                         }
                     }
                 }
@@ -1119,11 +1143,11 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
         if best_len >= LZV2_MIN_MATCH {
             let mut skip = false;
             if best_len < GOOD_MATCH && i + 1 + LZV2_MIN_MATCH <= n && best_len < LZV2_MAX_MATCH {
-                let h2 = lzv2_hash(data, i + 1) as usize;
+                let h2 = lzv2_hash(data, i + 1, hash_bits) as usize;
                 let mut pos2 = head[h2];
-                let min_pos2 = (base + i + 1).saturating_sub(window_size).max(base);
+                let min_pos2 = (base + i + 1).saturating_sub(window_size.min(65536)).max(base);
                 let mut cl2 = 0;
-                while !pos2.is_sentinel() && pos2.to_usize() >= min_pos2 && cl2 < LZV2_MAX_CHAIN / 2 {
+                while !pos2.is_sentinel() && pos2.to_usize() >= min_pos2 && cl2 < max_chain_limit / 2 {
                     let p = pos2.to_usize() - base;
                     let mut limit = n - (i + 1);
                     if limit > LZV2_MAX_MATCH {
@@ -1147,18 +1171,18 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
             if skip {
                 symbols.push(data[i] as u16);
                 i += 1;
-                let h3 = lzv2_hash(data, i) as usize;
+                let h3 = lzv2_hash(data, i, hash_bits) as usize;
                 prev[(base + i) & (window_size - 1)] = head[h3];
                 head[h3] = T::from_usize(base + i);
 
                 // Lazy-2: check if we should skip i again in favor of i+1
                 let mut skip2 = false;
                 if best_len < GOOD_MATCH && i + 1 + LZV2_MIN_MATCH <= n && best_len < LZV2_MAX_MATCH {
-                    let h2 = lzv2_hash(data, i + 1) as usize;
+                    let h2 = lzv2_hash(data, i + 1, hash_bits) as usize;
                     let mut pos2 = head[h2];
-                    let min_pos2 = (base + i + 1).saturating_sub(window_size).max(base);
+                    let min_pos2 = (base + i + 1).saturating_sub(window_size.min(65536)).max(base);
                     let mut cl2 = 0;
-                    while !pos2.is_sentinel() && pos2.to_usize() >= min_pos2 && cl2 < LZV2_MAX_CHAIN / 2 {
+                    while !pos2.is_sentinel() && pos2.to_usize() >= min_pos2 && cl2 < max_chain_limit / 2 {
                         let p = pos2.to_usize() - base;
                         let mut limit = n - (i + 1);
                         if limit > LZV2_MAX_MATCH {
@@ -1182,7 +1206,7 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
                 if skip2 {
                     symbols.push(data[i] as u16);
                     i += 1;
-                    let h3 = lzv2_hash(data, i) as usize;
+                    let h3 = lzv2_hash(data, i, hash_bits) as usize;
                     prev[(base + i) & (window_size - 1)] = head[h3];
                     head[h3] = T::from_usize(base + i);
                 }
@@ -1200,7 +1224,7 @@ pub(crate) fn deflate_style_encode_with_buffers<T: TableIndex>(
             let step = if best_len >= 64 { 4 } else { 1 };
             for j in (1..best_len).step_by(step) {
                 if i + j + LZV2_MIN_MATCH <= n {
-                    let h = lzv2_hash(data, i + j) as usize;
+                    let h = lzv2_hash(data, i + j, hash_bits) as usize;
                     prev[(base + i + j) & (window_size - 1)] = head[h];
                     head[h] = T::from_usize(base + i + j);
                 }
@@ -1510,6 +1534,7 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
     let n = data.len();
     let num_blocks = n.div_ceil(block_size);
     let threads = num_threads(num_blocks);
+    let (hash_bits, hash_size) = get_hash_params(window_size);
 
     use std::mem::MaybeUninit;
     let mut encoded_blocks: Vec<MaybeUninit<Vec<u8>>> = (0..num_blocks)
@@ -1517,7 +1542,7 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
         .collect();
 
     if threads <= 1 {
-        let mut head = vec![T::SENTINEL; LZV2_HASH_SIZE];
+        let mut head = vec![T::SENTINEL; hash_size];
         let mut prev = vec![T::SENTINEL; window_size];
         let mut buffers = CompressBuffers::new();
         let mut base = 0;
@@ -1525,7 +1550,7 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
             let start = b * block_size;
             let end = std::cmp::min(start + block_size, n);
             let block = &data[start..end];
-            let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version, base);
+            let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version, base, hash_bits);
             let res = encode_block_result(block, c_opt, 0, version);
             encoded_blocks[b].write(res);
             base += block_size;
@@ -1538,7 +1563,7 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
                 let start = base;
                 base += chunk.len();
                 s.spawn(move || {
-                    let mut head = vec![T::SENTINEL; LZV2_HASH_SIZE];
+                    let mut head = vec![T::SENTINEL; hash_size];
                     let mut prev = vec![T::SENTINEL; window_size];
                     let mut buffers = CompressBuffers::new();
                     let mut base = 0;
@@ -1547,7 +1572,7 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
                         let block_start = b * block_size;
                         let block_end = std::cmp::min(block_start + block_size, n);
                         let block = &data[block_start..block_end];
-                        let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version, base);
+                        let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version, base, hash_bits);
                         let res = encode_block_result(block, c_opt, 0, version);
                         slot.write(res);
                         base += block_size;

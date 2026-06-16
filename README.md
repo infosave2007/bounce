@@ -25,7 +25,7 @@
 
 `bounce` is engineered to handle massive, dense binary files where traditional archivers struggle with either speed or memory overhead.
 
-- **Large Language Models (LLMs) & Neural Networks**: Excels at compressing and decompressing gigabyte-sized AI weights (`.safetensors`, `.gguf`, `.pt`, `.bin`). The byte-shuffle transform effortlessly aligns `float16`/`float32` structures, delivering extreme decompression speeds (~1.3 GB/s) critical for rapid model-loading pipelines.
+- **Large Language Models (LLMs) & Neural Networks**: Excels at compressing and decompressing gigabyte-sized AI weights (`.safetensors`, `.gguf`, `.pt`, `.bin`). The byte-shuffle transform effortlessly aligns `float16`/`float32` structures, delivering extreme decompression speeds (~1.2 GB/s) critical for rapid model-loading pipelines.
 - **High-Performance Computing (HPC) & Big Data**: Rapid archiving of binary datasets, memory dumps, and telemetry data where maximizing sequential disk I/O throughput is paramount.
 - **Game Development & Asset Bundling**: Fast packing and unpacking of large binary asset archives (textures, geometry, audio banks) thanks to asynchronous buffer pools and zero external dependencies.
 
@@ -102,19 +102,19 @@ bounce <command> [options] <archive> [files...]
 
 ### Compression Levels Example
 
-*Effect of compression levels on a 50.7 MB highly compressed video file (`.mp4`):*
+*Effect of compression levels on a 61.7 MB highly compressed video file (`.mp4`):*
 
 | Level | Window / Block Size | Compressed Size | Ratio |
 |-------|---------------------|-----------------|-------|
-| `-1` | 64 KB / 128 KB | 49.8 MB | 98.2% |
-| `-2` | 128 KB / 128 KB | 49.8 MB | 98.2% |
-| `-3` | 256 KB / 256 KB | 49.8 MB | 98.2% |
-| `-5` | 1 MB / 1 MB | 49.0 MB | 96.5% |
-| `-6` | 2 MB / 2 MB | 47.9 MB | 94.4% |
-| `-7` | 4 MB / 4 MB | 47.7 MB | 94.0% |
-| `-8` | 8 MB / 8 MB | 46.8 MB | 92.3% |
-| `-9` | 16 MB / 16 MB | 46.8 MB | 92.1% |
-| `-10`| 32 MB / 32 MB | 46.8 MB | 92.1% |
+| `-1` | 64 KB / 128 KB | 61.5 MB | 99.7% |
+| `-2` | 128 KB / 128 KB | 61.4 MB | 99.6% |
+| `-3` | 256 KB / 256 KB | 61.4 MB | 99.6% |
+| `-5` | 1 MB / 1 MB | 61.4 MB | 99.6% |
+| `-6` | 2 MB / 2 MB | 61.4 MB | 99.6% |
+| `-7` | 4 MB / 4 MB | 61.4 MB | 99.6% |
+| `-8` | 8 MB / 8 MB | 61.4 MB | 99.6% |
+| `-9` | 16 MB / 16 MB | 61.4 MB | 99.6% |
+| `-10`| 32 MB / 32 MB | 61.4 MB | 99.6% |
 
 ### Examples
 
@@ -170,7 +170,7 @@ Run benchmarks locally using: `bash benchmark.sh`
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **34.7 MB** | **36.4%** | **167.9 MB/s** | **2379.4 MB/s** |
+| **bounce -2** | **34.6 MB** | **36.2%** | **79.1 MB/s** | **753.6 MB/s** |
 | zstd -3 | 33.8 MB | 35.4% | 753.3 MB/s | 823.6 MB/s |
 | gzip -9 | 34.8 MB | 36.5% | 32.1 MB/s | 653.5 MB/s |
 | lz4 -9 | 40.3 MB | 42.3% | 240.9 MB/s | 1210.9 MB/s |
@@ -183,7 +183,7 @@ Run benchmarks locally using: `bash benchmark.sh`
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **218.1 MB** | **85.3%** | **166.2 MB/s** | **6269.4 MB/s** |
+| **bounce -2** | **218.1 MB** | **85.3%** | **110.1 MB/s** | **1163.8 MB/s** |
 | zstd -3 | 235.3 MB | 92.1% | 2056.8 MB/s | 1035.1 MB/s |
 | gzip -9 | 235.6 MB | 92.2% | 39.2 MB/s | 481.2 MB/s |
 | lz4 -9 | 255.5 MB | 100.0% | 381.3 MB/s | 2889.1 MB/s |
@@ -196,7 +196,7 @@ Run benchmarks locally using: `bash benchmark.sh`
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **65.6 MB** | **32.5%** | **242.2 MB/s** | **4645.1 MB/s** |
+| **bounce -2** | **65.4 MB** | **32.3%** | **163.7 MB/s** | **698.0 MB/s** |
 | zstd -3 | 63.2 MB | 31.3% | 1337.3 MB/s | 1150.3 MB/s |
 | gzip -9 | 64.5 MB | 31.9% | 19.5 MB/s | 896.2 MB/s |
 | lz4 -9 | 74.4 MB | 36.8% | 252.7 MB/s | 1848.5 MB/s |
@@ -209,7 +209,7 @@ Run benchmarks locally using: `bash benchmark.sh`
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **35.0 MB** | **21.3%** | **157.7 MB/s** | **4077.1 MB/s** |
+| **bounce -2** | **35.1 MB** | **21.3%** | **79.5 MB/s** | **759.2 MB/s** |
 | zstd -3 | 37.9 MB | 23.1% | 1286.2 MB/s | 935.9 MB/s |
 | gzip -9 | 33.2 MB | 20.2% | 7.6 MB/s | 1121.7 MB/s |
 | lz4 -9 | 46.9 MB | 28.5% | 108.0 MB/s | 1679.0 MB/s |
@@ -222,7 +222,7 @@ Run benchmarks locally using: `bash benchmark.sh`
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -2** | **20.4 MB** | **11.3%** | **412.8 MB/s** | **4709.5 MB/s** |
+| **bounce -2** | **19.0 MB** | **10.5%** | **259.1 MB/s** | **1010.3 MB/s** |
 | zstd -3 | 17.7 MB | 9.8% | 1916.6 MB/s | 1795.7 MB/s |
 | gzip -9 | 21.2 MB | 11.7% | 46.4 MB/s | 1733.4 MB/s |
 | lz4 -9 | 23.6 MB | 13.1% | 576.7 MB/s | 2092.8 MB/s |
@@ -235,7 +235,7 @@ Run benchmarks locally using: `bash benchmark.sh`
 
 | Tool | Size | Ratio | C (Speed) | D (Speed) |
 |------|-----:|------:|----------:|----------:|
-| **bounce -9** | **60.8 MB** | **98.6%** | **0.3 MB/s** | **461.4 MB/s** |
+| **bounce -9** | **61.4 MB** | **99.6%** | **134.9 MB/s** | **233.2 MB/s** |
 | zstd -3 | 61.6 MB | 99.8% | 932.9 MB/s | 1504.3 MB/s |
 | gzip -9 | 61.5 MB | 99.7% | 57.2 MB/s | 721.0 MB/s |
 | lz4 -9 | 61.6 MB | 99.9% | 302.7 MB/s | 1274.0 MB/s |
