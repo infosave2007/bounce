@@ -2422,11 +2422,10 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
 
                     if *current_idx < *stride * *groups {
                         let g_start = *current_idx / *stride;
-                        let offset_start = g_start % BLOCK_SIZE;
-                        let remaining_in_block = BLOCK_SIZE - offset_start;
+                        let curr_block_size = active_blocks[0].front().unwrap().len();
                         
                         let groups_left = *groups - g_start;
-                        let groups_to_process = std::cmp::min(remaining_in_block, groups_left);
+                        let groups_to_process = std::cmp::min(curr_block_size, groups_left);
                         
                         let new_len = groups_to_process * *stride;
                         buffer.clear();
@@ -2438,13 +2437,12 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                         }
                         
                         for g_offset in 0..groups_to_process {
-                            let offset_in_block = offset_start + g_offset;
                             if self.version >= 3 {
                                 if *stride == 4 {
-                                    let v0 = unsafe { *block_slices.get_unchecked(0).get_unchecked(offset_in_block) } as u32;
-                                    let v1 = unsafe { *block_slices.get_unchecked(1).get_unchecked(offset_in_block) } as u32;
-                                    let v2 = unsafe { *block_slices.get_unchecked(2).get_unchecked(offset_in_block) } as u32;
-                                    let v3 = unsafe { *block_slices.get_unchecked(3).get_unchecked(offset_in_block) } as u32;
+                                    let v0 = unsafe { *block_slices.get_unchecked(0).get_unchecked(g_offset) } as u32;
+                                    let v1 = unsafe { *block_slices.get_unchecked(1).get_unchecked(g_offset) } as u32;
+                                    let v2 = unsafe { *block_slices.get_unchecked(2).get_unchecked(g_offset) } as u32;
+                                    let v3 = unsafe { *block_slices.get_unchecked(3).get_unchecked(g_offset) } as u32;
                                     // Depending on endianness, we might want from_le_bytes, but we just need byte 0 to be v0, byte 1 to be v1, etc.
                                     let combined = u32::from_le_bytes([v0 as u8, v1 as u8, v2 as u8, v3 as u8]);
                                     unsafe {
@@ -2453,13 +2451,13 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                                     }
                                 } else {
                                     for s in 0..*stride {
-                                        let val = unsafe { *block_slices.get_unchecked(s).get_unchecked(offset_in_block) };
+                                        let val = unsafe { *block_slices.get_unchecked(s).get_unchecked(g_offset) };
                                         unsafe { *buffer.get_unchecked_mut(g_offset * *stride + s) = val; }
                                     }
                                 }
                             } else {
                                 for s in 0..*stride {
-                                    let delta = unsafe { *block_slices.get_unchecked(s).get_unchecked(offset_in_block) };
+                                    let delta = unsafe { *block_slices.get_unchecked(s).get_unchecked(g_offset) };
                                     let val = delta.wrapping_add(prev_byte[s]);
                                     prev_byte[s] = val;
                                     unsafe { *buffer.get_unchecked_mut(g_offset * *stride + s) = val; }
@@ -2471,7 +2469,7 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                         *buf_pos = 0;
                         
                         let g_end = *current_idx / *stride;
-                        if g_end % BLOCK_SIZE == 0 || g_end == *groups {
+                        if groups_to_process == curr_block_size || g_end == *groups {
                             for s in 0..*stride {
                                 active_blocks[s].pop_front();
                             }
@@ -2479,24 +2477,22 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
                     } else {
                         // Remainder bytes
                         let remaining_bytes = orig_size_usize - *current_idx;
-                        let offset_start = *current_idx % BLOCK_SIZE;
-                        let remaining_in_block = BLOCK_SIZE - offset_start;
-                        let to_process = std::cmp::min(remaining_bytes, remaining_in_block);
+                        let curr_block_size = active_blocks[*stride - 1].front().unwrap().len();
+                        let to_process = std::cmp::min(remaining_bytes, curr_block_size);
                         
                         buffer.clear();
                         buffer.resize(to_process, 0);
                         
                         let block_slice = active_blocks[*stride - 1].front().unwrap().as_slice();
                         for i in 0..to_process {
-                            let offset_in_block = offset_start + i;
-                            let b = unsafe { *block_slice.get_unchecked(offset_in_block) };
+                            let b = unsafe { *block_slice.get_unchecked(i) };
                             unsafe { *buffer.get_unchecked_mut(i) = b; }
                         }
                         
                         *current_idx += to_process;
                         *buf_pos = 0;
                         
-                        if (*current_idx % BLOCK_SIZE == 0) || (*current_idx == orig_size_usize) {
+                        if to_process == curr_block_size || *current_idx == orig_size_usize {
                             active_blocks[*stride - 1].pop_front();
                         }
                     }
