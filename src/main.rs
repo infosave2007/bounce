@@ -286,10 +286,55 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // Hidden benchmark command for the dedup-friendly (content-defined chunked) mode.
+        // Usage: bounce cdc <input> <output.cdc>
+        "cdc" => match cmd_cdc(rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        },
         other => {
             eprintln!("error: unknown command '{other}'\n");
             print_usage();
             ExitCode::FAILURE
         }
     }
+}
+
+fn cmd_cdc(args: &[String]) -> Result<(), String> {
+    if args.len() < 2 {
+        return Err("usage: bounce cdc <input> <output.cdc>".to_string());
+    }
+    let data = std::fs::read(&args[0]).map_err(|e| format!("read {}: {e}", args[0]))?;
+    let (window, block, version) = (65536usize, 128 * 1024usize, 2u8);
+
+    // Whole-file compression (current behavior) for comparison.
+    let whole = codec::smart_compress_with_version(&data, window, block, version)
+        .map(|(c, _)| c.len())
+        .unwrap_or(data.len());
+
+    // Dedup-friendly content-defined chunked compression.
+    let cdc = codec::cdc_compress(&data, window, block, version);
+    let back = codec::cdc_decompress(&cdc)?;
+    if back != data {
+        return Err("cdc round-trip mismatch!".to_string());
+    }
+    std::fs::write(&args[1], &cdc).map_err(|e| format!("write {}: {e}", args[1]))?;
+
+    let n = data.len() as f64;
+    println!("input                 {:>12}", human(data.len() as u64));
+    println!(
+        "whole-file (current)  {:>12}   ratio {:>5.1}%",
+        human(whole as u64),
+        whole as f64 / n * 100.0
+    );
+    println!(
+        "cdc dedup-friendly    {:>12}   ratio {:>5.1}%   round-trip OK -> {}",
+        human(cdc.len() as u64),
+        cdc.len() as f64 / n * 100.0,
+        args[1]
+    );
+    Ok(())
 }

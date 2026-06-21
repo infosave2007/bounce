@@ -1522,6 +1522,70 @@ fn deflate_blocked_encode(data: &[u8]) -> Option<Vec<u8>> {
     deflate_blocked_encode_with_version(data, 65536, 128 * 1024, 2)
 }
 
+/// Content-defined block boundaries (target size `block_size`).
+///
+/// Blocks in the stream are self-describing (each stores its own orig/comp size),
+/// so making the *encoder* cut on content instead of fixed offsets keeps the exact
+/// same on-disk format and decoder, while making the output shift-resistant: an
+/// insertion/deletion only reshapes the block(s) it lands in, so unchanged regions
+/// stay byte-identical and dedup (Xet) across revisions and forks.
+fn cdc_block_bounds(data: &[u8], block_size: usize) -> Vec<(usize, usize)> {
+    let gear = cdc_gear_table();
+    let avg = block_size.max(1024).next_power_of_two();
+    let min = (avg / 4).max(512);
+    let max = avg.saturating_mul(4);
+    let bits = (avg as u64).trailing_zeros();
+    let mask_s = (1u64 << (bits + 2)) - 1;
+    let mask_l = (1u64 << bits.saturating_sub(2)) - 1;
+    let n = data.len();
+    let mut bounds = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let end = (i + max).min(n);
+        if end - i <= min {
+            bounds.push((i, end));
+            i = end;
+            continue;
+        }
+        let center = (i + avg).min(end);
+        let mut fp: u64 = 0;
+        let mut cut = end;
+        let mut j = i + min;
+        while j < end {
+            fp = (fp << 1).wrapping_add(gear[data[j] as usize]);
+            j += 1;
+            if j < center {
+                if fp & mask_s == 0 {
+                    cut = j;
+                    break;
+                }
+            } else if fp & mask_l == 0 {
+                cut = j;
+                break;
+            }
+        }
+        bounds.push((i, cut));
+        i = cut;
+    }
+    bounds
+}
+
+/// Block boundaries for the blocked encoder.
+///
+/// Content-defined boundaries are the **default**: same on-disk format, same
+/// decoder, same compression ratio, but shift-resistant so revisions/forks dedup
+/// under Xet-style chunking. Set `BNC_FIXED_BLOCKS=1` to fall back to the old
+/// fixed-size boundaries (kept as an escape hatch for A/B testing).
+fn block_boundaries(data: &[u8], block_size: usize) -> Vec<(usize, usize)> {
+    let n = data.len();
+    if std::env::var_os("BNC_FIXED_BLOCKS").is_some() {
+        let nb = n.div_ceil(block_size);
+        (0..nb).map(|b| (b * block_size, ((b + 1) * block_size).min(n))).collect()
+    } else {
+        cdc_block_bounds(data, block_size)
+    }
+}
+
 pub fn deflate_blocked_encode_with_version(
     data: &[u8],
     window_size: usize,
@@ -1546,7 +1610,8 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
     version: u8,
 ) -> Option<Vec<u8>> {
     let n = data.len();
-    let num_blocks = n.div_ceil(block_size);
+    let bounds = block_boundaries(data, block_size);
+    let num_blocks = bounds.len();
     let threads = num_threads(num_blocks);
     let (hash_bits, hash_size) = get_hash_params(window_size);
 
@@ -1560,36 +1625,35 @@ fn deflate_blocked_encode_with_version_impl<T: TableIndex>(
         let mut prev = vec![T::SENTINEL; window_size];
         let mut buffers = CompressBuffers::new();
         let mut base = 0;
-        for b in 0..num_blocks {
-            let start = b * block_size;
-            let end = std::cmp::min(start + block_size, n);
+        for (b, &(start, end)) in bounds.iter().enumerate() {
             let block = &data[start..end];
             let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version, base, hash_bits);
             let res = encode_block_result(block, c_opt, 0, version);
             encoded_blocks[b].write(res);
-            base += block_size;
+            base += end - start;
         }
     } else {
         let chunk_size = num_blocks.div_ceil(threads);
+        let bounds_ref = &bounds;
         std::thread::scope(|s| {
-            let mut base = 0usize;
+            let mut start_idx = 0usize;
             for chunk in encoded_blocks.chunks_mut(chunk_size) {
-                let start = base;
-                base += chunk.len();
+                let cstart = start_idx;
+                start_idx += chunk.len();
                 s.spawn(move || {
                     let mut head = vec![T::SENTINEL; hash_size];
                     let mut prev = vec![T::SENTINEL; window_size];
                     let mut buffers = CompressBuffers::new();
+                    // `base` is relative to this thread's fresh head/prev session; matches are
+                    // clamped to the current block start, so blocks stay independently decodable.
                     let mut base = 0;
                     for (j, slot) in chunk.iter_mut().enumerate() {
-                        let b = start + j;
-                        let block_start = b * block_size;
-                        let block_end = std::cmp::min(block_start + block_size, n);
+                        let (block_start, block_end) = bounds_ref[cstart + j];
                         let block = &data[block_start..block_end];
                         let c_opt = deflate_style_encode_with_buffers(block, &mut head, &mut prev, &mut buffers, window_size, version, base, hash_bits);
                         let res = encode_block_result(block, c_opt, 0, version);
                         slot.write(res);
-                        base += block_size;
+                        base += block_end - block_start;
                     }
                 });
             }
@@ -2525,9 +2589,283 @@ impl<R: Read + Seek> Read for DecompressReader<R> {
     }
 }
 
+// ============================================================================
+// Dedup-friendly mode: content-defined chunking + per-chunk Big Bounce codec.
+//
+// Motivation: compressing a whole file as one stream gives a great ratio but
+// destroys chunk-level deduplication (Xet/CDC) — any edit cascades through the
+// stream, so a one-tensor change re-stores the whole file. Splitting the input
+// into *content-defined* chunks and compressing each independently (still with
+// the byte-shuffle + Huffman codec) keeps most of the ratio while making the
+// stored bytes shift-resistant, so unchanged regions dedup across revisions and
+// forks. Output is deterministic.
+//
+// Container ("BNCD"): magic[4] | version u8 | chunk_count u32le |
+//   chunk_count × { orig_len u32le, stored_len u32le, method u8, raw u8 } |
+//   concatenated chunk payloads.
+// ============================================================================
+
+pub(crate) const CDC_MIN: usize = 4 * 1024;
+pub(crate) const CDC_AVG: usize = 16 * 1024;
+pub(crate) const CDC_MAX: usize = 64 * 1024;
+
+fn cdc_gear_table() -> [u64; 256] {
+    // Deterministic table via splitmix64 (no external dependency).
+    let mut t = [0u64; 256];
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    for slot in t.iter_mut() {
+        x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = x;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        *slot = z ^ (z >> 31);
+    }
+    t
+}
+
+/// Resolve CDC parameters, allowing an env override (`BNC_CDC_AVG_KB`) for sweeps.
+/// `min = avg/4`, `max = avg*4`. avg is rounded to a power of two.
+fn cdc_params() -> (usize, usize, usize) {
+    let avg = match std::env::var("BNC_CDC_AVG_KB").ok().and_then(|v| v.parse::<usize>().ok()) {
+        Some(kb) if kb > 0 => (kb * 1024).next_power_of_two(),
+        _ => CDC_AVG,
+    };
+    (avg / 4, avg, avg * 4)
+}
+
+/// Split `data` into content-defined chunks (FastCDC, normalized chunking).
+fn cdc_chunks(data: &[u8]) -> Vec<(usize, usize)> {
+    let gear = cdc_gear_table();
+    let (cdc_min, cdc_avg, cdc_max) = cdc_params();
+    let bits = (cdc_avg as u64).trailing_zeros();
+    let mask_s = (1u64 << (bits + 2)) - 1; // stricter before the average point
+    let mask_l = (1u64 << (bits - 2)) - 1; // looser after it
+    let n = data.len();
+    let mut chunks = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let end = (i + cdc_max).min(n);
+        if end - i <= cdc_min {
+            chunks.push((i, end - i));
+            i = end;
+            continue;
+        }
+        let center = (i + cdc_avg).min(end);
+        let mut fp: u64 = 0;
+        let mut cut = end;
+        let mut j = i + CDC_MIN;
+        while j < end {
+            fp = (fp << 1).wrapping_add(gear[data[j] as usize]);
+            j += 1;
+            if j < center {
+                if fp & mask_s == 0 {
+                    cut = j;
+                    break;
+                }
+            } else if fp & mask_l == 0 {
+                cut = j;
+                break;
+            }
+        }
+        chunks.push((i, cut - i));
+        i = cut;
+    }
+    chunks
+}
+
+/// Compress `data` in dedup-friendly mode (content-defined chunks, each encoded
+/// independently with the Big Bounce codec). Deterministic.
+pub fn cdc_compress(data: &[u8], window_size: usize, block_size: usize, version: u8) -> Vec<u8> {
+    let chunks = cdc_chunks(data);
+    let mut records: Vec<(u32, u32, u8, u8)> = Vec::with_capacity(chunks.len());
+    let mut payload: Vec<u8> = Vec::new();
+    for (off, len) in chunks {
+        let raw = &data[off..off + len];
+        let (stored, method, is_raw) = match smart_compress_with_version(raw, window_size, block_size, version) {
+            Some((c, m)) if c.len() < raw.len() => (c, m.to_u8(), 0u8),
+            _ => (raw.to_vec(), 0u8, 1u8),
+        };
+        records.push((len as u32, stored.len() as u32, method, is_raw));
+        payload.extend_from_slice(&stored);
+    }
+    let mut out = Vec::with_capacity(9 + records.len() * 10 + payload.len());
+    out.extend_from_slice(b"BNCD");
+    out.push(version);
+    out.extend_from_slice(&(records.len() as u32).to_le_bytes());
+    for (orig, stored, method, is_raw) in &records {
+        out.extend_from_slice(&orig.to_le_bytes());
+        out.extend_from_slice(&stored.to_le_bytes());
+        out.push(*method);
+        out.push(*is_raw);
+    }
+    out.extend_from_slice(&payload);
+    out
+}
+
+/// Inverse of [`cdc_compress`].
+pub fn cdc_decompress(blob: &[u8]) -> Result<Vec<u8>, String> {
+    if blob.len() < 9 || &blob[..4] != b"BNCD" {
+        return Err("not a BNCD (dedup-friendly) stream".to_string());
+    }
+    let version = blob[4];
+    let count = u32::from_le_bytes(blob[5..9].try_into().unwrap()) as usize;
+    let mut pos = 9;
+    let mut recs: Vec<(usize, usize, u8, u8)> = Vec::with_capacity(count);
+    for _ in 0..count {
+        if pos + 10 > blob.len() {
+            return Err("truncated BNCD index".to_string());
+        }
+        let orig = u32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap()) as usize;
+        let stored = u32::from_le_bytes(blob[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let method = blob[pos + 8];
+        let is_raw = blob[pos + 9];
+        pos += 10;
+        recs.push((orig, stored, method, is_raw));
+    }
+    let mut out = Vec::new();
+    for (orig, stored, method, is_raw) in recs {
+        if pos + stored > blob.len() {
+            return Err("truncated BNCD payload".to_string());
+        }
+        let chunk = &blob[pos..pos + stored];
+        pos += stored;
+        if is_raw == 1 {
+            out.extend_from_slice(chunk);
+        } else {
+            let m = CompressMethod::from_u8(method).ok_or("invalid method in BNCD stream")?;
+            out.extend_from_slice(&smart_decompress_with_version(chunk, m, orig, version)?);
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Split a blocked stream into its per-block compressed payloads.
+    fn blocked_payloads(blob: &[u8]) -> Vec<Vec<u8>> {
+        let num = u32::from_le_bytes(blob[0..4].try_into().unwrap()) as usize;
+        let mut pos = 4;
+        let mut out = Vec::with_capacity(num);
+        for _ in 0..num {
+            let comp = u32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 10; // comp u32 + orig u32 + flag u8 + lane u8
+            out.push(blob[pos..pos + comp].to_vec());
+            pos += comp;
+        }
+        out
+    }
+
+    fn structured_floats(n: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(n * 4);
+        for i in 0..n as u32 {
+            let v = 0.02f32 + (i as f32 / 4000.0).sin() * 0.003 + (i as f32 / 130.0).cos() * 0.0005;
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        data
+    }
+
+    #[test]
+    fn test_cdc_blocks_shift_dedup() {
+        // Content-defined blocks are the default; a byte-shift near the front must
+        // leave most later blocks byte-identical (so Xet would dedup them).
+        let data = structured_floats(160 * 1024); // ~640 KB
+        let a = deflate_blocked_encode_with_version(&data, 65536, 128 * 1024, 2).unwrap();
+
+        let mut shifted = data.clone();
+        shifted.splice(2048..2048, (0..100u32).map(|i| (i % 256) as u8)); // insert 100 bytes
+        let b = deflate_blocked_encode_with_version(&shifted, 65536, 128 * 1024, 2).unwrap();
+
+        let pa = blocked_payloads(&a);
+        let sb: std::collections::HashSet<Vec<u8>> = blocked_payloads(&b).into_iter().collect();
+        let shared: usize = pa.iter().filter(|p| sb.contains(*p)).map(|p| p.len()).sum();
+        let total: usize = pa.iter().map(|p| p.len()).sum();
+        let pct = shared * 100 / total;
+        assert!(pct >= 60, "shift deduped only {pct}% of blocked payload bytes");
+    }
+
+    #[test]
+    fn test_cdc_bounds_resync_after_shift() {
+        // Mechanism check (no env, deterministic): content-defined boundaries re-sync
+        // after an insertion so most chunks reappear byte-identical, whereas fixed
+        // boundaries shift and dedup almost nothing.
+        let data = structured_floats(160 * 1024);
+        let mut shifted = data.clone();
+        shifted.splice(2048..2048, (0..100u32).map(|i| (i % 256) as u8));
+
+        let cdc_a = cdc_block_bounds(&data, 128 * 1024);
+        let cdc_set: std::collections::HashSet<&[u8]> =
+            cdc_block_bounds(&shifted, 128 * 1024).iter().map(|&(s, e)| &shifted[s..e]).collect();
+        let cdc_shared: usize =
+            cdc_a.iter().map(|&(s, e)| &data[s..e]).filter(|c| cdc_set.contains(*c)).map(|c| c.len()).sum();
+        let cdc_total: usize = cdc_a.iter().map(|&(s, e)| e - s).sum();
+        assert!(cdc_shared * 100 / cdc_total >= 60, "cdc re-synced only {}%", cdc_shared * 100 / cdc_total);
+
+        let fixed_set: std::collections::HashSet<&[u8]> = shifted.chunks(128 * 1024).collect();
+        let fixed_shared: usize =
+            data.chunks(128 * 1024).filter(|c| fixed_set.contains(*c)).map(|c| c.len()).sum();
+        assert!(fixed_shared * 100 / data.len() <= 20, "fixed boundaries unexpectedly re-synced");
+    }
+
+    #[test]
+    fn test_cdc_roundtrip() {
+        // Build ~512 KB of float32-like structured data.
+        let mut data = Vec::with_capacity(512 * 1024);
+        for i in 0..(128 * 1024u32) {
+            let v = 0.01f32 + (i as f32 / 50000.0).sin() * 0.001;
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        let blob = cdc_compress(&data, 65536, 128 * 1024, 2);
+        assert_eq!(&blob[..4], b"BNCD");
+        assert!(blob.len() < data.len(), "cdc did not compress structured data");
+        let back = cdc_decompress(&blob).unwrap();
+        assert_eq!(back, data);
+    }
+
+    // Split a BNCD stream into its per-chunk payload byte-vectors.
+    fn cdc_payloads(blob: &[u8]) -> Vec<Vec<u8>> {
+        let count = u32::from_le_bytes(blob[5..9].try_into().unwrap()) as usize;
+        let mut pos = 9;
+        let mut sizes = Vec::with_capacity(count);
+        for _ in 0..count {
+            sizes.push(u32::from_le_bytes(blob[pos + 4..pos + 8].try_into().unwrap()) as usize);
+            pos += 10;
+        }
+        sizes
+            .into_iter()
+            .map(|s| {
+                let p = blob[pos..pos + s].to_vec();
+                pos += s;
+                p
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_cdc_locality() {
+        // Incompressible-ish data so chunk payloads are substantial.
+        let mut data = vec![0u8; 256 * 1024];
+        let mut x: u64 = 0x1234_5678;
+        for b in data.iter_mut() {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *b = (x >> 33) as u8;
+        }
+        let a = cdc_compress(&data, 65536, 128 * 1024, 2);
+        data[200 * 1024] ^= 0xFF; // flip one byte near the end (in place, no shift)
+        let b = cdc_compress(&data, 65536, 128 * 1024, 2);
+
+        // Most chunk payloads must stay byte-identical -> Xet would dedup them.
+        let pa = cdc_payloads(&a);
+        let shared: std::collections::HashSet<Vec<u8>> = cdc_payloads(&b).into_iter().collect();
+        let shared_bytes: usize = pa.iter().filter(|p| shared.contains(*p)).map(|p| p.len()).sum();
+        let total: usize = pa.iter().map(|p| p.len()).sum();
+        assert!(
+            shared_bytes * 100 / total >= 80,
+            "only {}% of payload bytes deduped after a 1-byte edit",
+            shared_bytes * 100 / total
+        );
+    }
 
     fn roundtrip(data: &[u8]) {
         match smart_compress(data) {
